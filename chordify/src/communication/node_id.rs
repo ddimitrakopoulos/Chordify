@@ -11,14 +11,16 @@
 //!
 //! # Examples
 //!
-//! ```
+//! ```rust
+//! use chordify::NodeId;
 //! use std::net::SocketAddr;
 //! let addr: SocketAddr = "192.168.1.1:8080".parse().unwrap();
 //! let node_id = NodeId::from_address(&addr);
 //! println!("Node ID: {}", node_id.to_hex());
 //! ```
 //! 
-//! ```
+//! ```rust
+//! use chordify::NodeId;
 //! let key = "Some string key";
 //! let node_id = NodeId::from_key(key);
 //! println!("Node ID from key: {}", node_id.to_hex());
