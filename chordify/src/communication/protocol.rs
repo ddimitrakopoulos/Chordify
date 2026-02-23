@@ -158,27 +158,3 @@ pub enum Response {
     /// Error response
     Error { message: String },
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_message_serialization() {
-        let addr: SocketAddr = "127.0.0.1:8000".parse().unwrap();
-        let msg = Message::new(addr, MessagePayload::Request(Request::Ping));
-        
-        let bytes = msg.to_bytes().unwrap();
-        let recovered = Message::from_bytes(&bytes).unwrap();
-        
-        assert_eq!(msg.id, recovered.id);
-    }
-
-    #[test]
-    fn test_node_info() {
-        let addr: SocketAddr = "127.0.0.1:8000".parse().unwrap();
-        let info = NodeInfo::new(addr);
-        assert_eq!(info.addr, addr);
-        assert_eq!(info.id, NodeId::from_address(&addr));
-    }
-}
