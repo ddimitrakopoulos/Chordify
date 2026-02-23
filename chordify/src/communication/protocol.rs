@@ -1,7 +1,12 @@
 //! Message Protocol for Chordify
-//! 
+//!
 //! Phase 2: Message Protocol
 //! Defines the message format for inter-node communication
+//!
+//! This module defines the protocol for all communication between nodes.
+//! Messages are serialized, include sender address, and wrap requests/responses.
+//! NodeInfo always includes ip address and port.
+//!
 
 use serde::{Serialize, Deserialize};
 use std::net::SocketAddr;
@@ -28,6 +33,7 @@ pub struct NodeInfo {
 }
 
 impl NodeInfo {
+    /// Create a new NodeInfo instance given a SocketAddr
     pub fn new(addr: SocketAddr) -> Self {
         Self {
             id: NodeId::from_address(&addr),
@@ -46,6 +52,7 @@ pub struct Message {
 }
 
 impl Message {
+    /// Create a new message
     pub fn new(sender: SocketAddr, payload: MessagePayload) -> Self {
         Self {
             id: generate_id(),
@@ -54,6 +61,7 @@ impl Message {
         }
     }
 
+    /// Create a response message to an existing request
     pub fn response(request_id: MessageId, sender: SocketAddr, payload: MessagePayload) -> Self {
         Self {
             id: request_id,
@@ -62,10 +70,12 @@ impl Message {
         }
     }
 
+    /// Serialize the message to bytes
     pub fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
         Ok(serde_json::to_vec(self)?)
     }
 
+    /// Deserialize bytes to reconstruct the message
     pub fn from_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
         Ok(serde_json::from_slice(bytes)?)
     }

@@ -1,7 +1,11 @@
 //! TCP Server for Chordify
-//! 
+//!
 //! Phase 2: Socket Setup
 //! Async TCP server using Tokio for concurrent request handling
+//!
+//! This module implements the server-side communication for Chordify nodes.
+//! Each node listens on its IP address and port (SocketAddr).
+//! Handles incoming requests, manages node state, and responds to protocol operations.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -27,6 +31,7 @@ pub struct NodeState {
 }
 
 impl NodeState {
+    /// Create a new `NodeState` instance for a given socket address.
     pub fn new(addr: SocketAddr) -> Self {
         Self {
             id: NodeId::from_address(&addr),
@@ -37,6 +42,7 @@ impl NodeState {
         }
     }
 
+    /// Get the node information (id and addr) for this state.
     pub fn info(&self) -> NodeInfo {
         NodeInfo {
             id: self.id,
@@ -53,16 +59,19 @@ pub struct Server {
 }
 
 impl Server {
+    /// Create a new `Server` instance bound to the given address.
     pub fn new(addr: SocketAddr) -> Self {
         let state = Arc::new(RwLock::new(NodeState::new(addr)));
         Self { addr, state }
     }
 
+    /// Get a clone of the server's state arc for sharing with tasks.
     pub fn state(&self) -> Arc<RwLock<NodeState>> {
         Arc::clone(&self.state)
     }
 
-    /// Start the server and listen for connections
+    /// Start the server and listen for incoming connections.
+    /// Runs an asynchronous loop that accepts and spawns a task for each connection.
     pub async fn start(&self) -> anyhow::Result<()> {
         let listener = TcpListener::bind(self.addr).await?;
         info!("Server listening on {}", self.addr);
@@ -87,6 +96,7 @@ impl Server {
 }
 
 /// Handle a single connection
+/// Reads messages in a loop, dispatches requests, and sends responses.
 async fn handle_connection(
     mut socket: TcpStream,
     peer: SocketAddr,
@@ -141,6 +151,7 @@ async fn handle_connection(
 }
 
 /// Handle a single request
+/// Dispatches requests to the appropriate handler based on the request type.
 async fn handle_request(request: Request, state: &Arc<RwLock<NodeState>>) -> Response {
     match request {
         Request::Ping => Response::Pong,
