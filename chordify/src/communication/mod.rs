@@ -9,13 +9,5 @@
 //!
 
 pub mod protocol;
-pub mod server;
-pub mod client;
-pub mod node_id;
-pub mod nodes;
 
-pub use protocol::{Request, Response, Message};
-pub use server::Server;
-pub use client::Client;
-pub use node_id::NodeId;
-pub use crate::nodes::{Client, Server};
+pub use protocol::{Request, Response, Message, NodeInfo, MessagePayload};

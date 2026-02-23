@@ -3,7 +3,9 @@
 //! This library provides the core functionality for a Chord DHT implementation.
 
 pub mod communication;
+pub mod nodes;
 
 // Re-export commonly used types
-pub use communication::{Client, Server, NodeId, Message, Request, Response};
+pub use nodes::{Client, Server, NodeId};
+pub use communication::{Message, Request, Response};
 pub use communication::protocol::{NodeInfo, MessagePayload};

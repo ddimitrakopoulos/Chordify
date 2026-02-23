@@ -11,7 +11,7 @@
 use serde::{Serialize, Deserialize};
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
-use crate::communication::node_id::NodeId;
+use crate::nodes::NodeId;
 
 /// Unique message identifier
 pub type MessageId = u64;

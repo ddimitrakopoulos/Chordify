@@ -10,12 +10,14 @@
 //! - Message Protocol: JSON-based custom protocol
 
 mod communication;
+mod nodes;
 
 use std::net::SocketAddr;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use communication::Server;
+use nodes::Server;
+use nodes::NodeId;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -32,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
         .parse()?;
 
     info!("Starting Chordify node at {}", addr);
-    info!("Node ID: {}", communication::NodeId::from_address(&addr));
+    info!("Node ID: {}", NodeId::from_address(&addr));
 
     // Create and start the server
     let server = Server::new(addr);
