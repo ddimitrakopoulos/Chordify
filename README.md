@@ -16,13 +16,13 @@
 ## 🚀 Progress Tracker / Roadmap
 
 ### Φάση 1: Επιλογές Αρχιτεκτονικής 
-- [ ] **Επιλογή Γλώσσας** Επιλογή γλώσσας για την υλοποίηση της εφαρμογής (Go / Python κ.α.)
-- [ ] **Επιλογή Βιβλιοθήκης** Επιλογή βιβλιοθηκών για την υλοποίηση της εφαρμογής
+- [x] **Επιλογή Γλώσσας:** Rust (safe, fast, excellent async support)
+- [x] **Επιλογή Βιβλιοθήκης:** Tokio (async runtime), Serde (serialization), SHA-1 (hashing), Anyhow (error handling), Tracing (logging)
 
 ### Φάση 2: Βασική Υποδομή Κόμβου (Node Infrastructure)
-- [ ] **Socket Setup:** Υλοποίηση server/client processes και multithreading για ταυτόχρονη εξυπηρέτηση αιτημάτων.
-- [ ] **ID Generation:** Υλοποίηση SHA-1 hash function στο ζεύγος `ip_address:port` για παραγωγή μοναδικού ID.
-- [ ] **Message Protocol:** Ορισμός μορφής μηνυμάτων για επικοινωνία μεταξύ κόμβων (Custom protocol).
+- [x] **Socket Setup:** Async TCP server/client με Tokio για concurrent request handling.
+- [x] **ID Generation:** SHA-1 hash function στο `ip_address:port` για παραγωγή 160-bit unique ID.
+- [x] **Message Protocol:** JSON-based custom protocol με Request/Response enums και length-prefixed framing.
 
 ### Φάση 3: Διαχείριση Μελών (Membership Management)
 - [ ] **Bootstrap Node:** Υλοποίηση σταθερού κόμβου για την αρχική σύνδεση.
