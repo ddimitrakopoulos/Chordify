@@ -6,8 +6,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::time::sleep;
 
-// Helper to get an available port
+// Helper to get a test node address (IP and port)
 fn get_test_addr(port: u16) -> SocketAddr {
+    // Nodes communicate via their ip address and port
     format!("127.0.0.1:{}", port).parse().unwrap()
 }
 

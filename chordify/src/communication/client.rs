@@ -20,6 +20,7 @@ const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// TCP Client for sending requests to other nodes
+/// Node communication is always via ip address and port (SocketAddr)
 pub struct Client {
     source_addr: SocketAddr,
     timeout: Duration,

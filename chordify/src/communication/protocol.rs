@@ -20,6 +20,7 @@ fn generate_id() -> MessageId {
 }
 
 /// Information about a node in the ring
+/// Node identity and communication is always via its ip address and port (SocketAddr)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NodeInfo {
     pub id: NodeId,
@@ -36,6 +37,7 @@ impl NodeInfo {
 }
 
 /// Wrapper message for all communication
+/// Sender is always identified by its ip address and port (SocketAddr)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub id: MessageId,

@@ -74,11 +74,13 @@ impl NodeId {
     }
 
     /// Minimum possible ID (all zeros)
+    /// Not associated with any real node; for ring arithmetic only.
     pub fn min() -> Self {
         Self { bytes: [0u8; 20] }
     }
 
     /// Maximum possible ID (all ones)
+    /// Not associated with any real node; for ring arithmetic only.
     pub fn max() -> Self {
         Self { bytes: [0xff; 20] }
     }

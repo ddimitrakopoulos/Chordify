@@ -17,6 +17,7 @@ use crate::communication::node_id::NodeId;
 const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 
 /// Shared node state for the server
+/// Node identity and communication is always via ip address and port (SocketAddr)
 pub struct NodeState {
     pub id: NodeId,
     pub addr: SocketAddr,
@@ -45,6 +46,7 @@ impl NodeState {
 }
 
 /// TCP Server for handling incoming connections
+/// Each node is identified by its ip address and port (SocketAddr)
 pub struct Server {
     addr: SocketAddr,
     state: Arc<RwLock<NodeState>>,
