@@ -1,11 +1,14 @@
 //! Chordify - P2P Song Sharing Application Library
 //!
 //! This library provides the core functionality for a Chord DHT implementation.
+//!
+//! # Modules
+//! - `communication`: Low-level P2P messaging (connect, send, answer).
+//! - `nodes`: Node identity (NodeId) and higher-level node logic.
 
 pub mod communication;
 pub mod nodes;
 
 // Re-export commonly used types
-pub use nodes::{Client, Server, NodeId};
-pub use communication::{Message, Request, Response};
-pub use communication::protocol::{NodeInfo, MessagePayload};
+pub use communication::{Peer, Connection};
+pub use nodes::NodeId;

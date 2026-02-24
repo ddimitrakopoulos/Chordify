@@ -1,13 +1,6 @@
 //! Chordify - P2P Song Sharing Application
 //! 
-//! Phase 1: Architecture Choices
-//! - Language: Rust (safe, fast, great async support)
-//! - Libraries: Tokio (async runtime), Serde (serialization), SHA-1 (hashing)
-//!
-//! Phase 2: Basic Node Infrastructure
-//! - Socket Setup: Async TCP server/client with Tokio
-//! - ID Generation: SHA-1 hash of ip:port
-//! - Message Protocol: JSON-based custom protocol
+//! A peer-to-peer song sharing application using the Chord DHT protocol.
 
 mod communication;
 mod nodes;
@@ -16,7 +9,7 @@ use std::net::SocketAddr;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use nodes::Server;
+use communication::Peer;
 use nodes::NodeId;
 
 #[tokio::main]
@@ -33,24 +26,38 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| "127.0.0.1:8000".to_string())
         .parse()?;
 
-    info!("Starting Chordify node at {}", addr);
+    info!("Starting Chordify peer at {}", addr);
     info!("Node ID: {}", NodeId::from_address(&addr));
 
-    // Create and start the server
-    let server = Server::new(addr);
+    // Create peer and start listening
+    let peer = Peer::new(addr);
     
-    // Initialize as single-node ring (self is successor and predecessor)
-    {
-        let state = server.state();
-        let mut state = state.write().await;
-        let self_info = state.info();
-        state.successor = Some(self_info.clone());
-        state.predecessor = Some(self_info);
-        info!("Initialized single-node ring");
-    }
-
-    // Start listening for connections
-    server.start().await?;
+    // Handle incoming connections
+    peer.listen(|mut conn| async move {
+        info!("New connection from {}", conn.peer_addr());
+        
+        // Simple echo handler for demonstration
+        loop {
+            match conn.receive().await {
+                Ok(Some(data)) => {
+                    info!("Received {} bytes from {}", data.len(), conn.peer_addr());
+                    // Echo back
+                    if let Err(e) = conn.answer(&data).await {
+                        info!("Error sending response: {}", e);
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    info!("Connection closed by {}", conn.peer_addr());
+                    break;
+                }
+                Err(e) => {
+                    info!("Error receiving: {}", e);
+                    break;
+                }
+            }
+        }
+    }).await?;
 
     Ok(())
 }
