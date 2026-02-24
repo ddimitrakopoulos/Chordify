@@ -4,21 +4,16 @@
 
 use serde::{Serialize, Deserialize};
 use std::net::SocketAddr;
-use super::NodeId;
 
-/// Information about a node (ID + address)
+/// Information about a node (address only)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NodeInfo {
-    pub id: NodeId,
     pub addr: SocketAddr,
 }
 
 impl NodeInfo {
     pub fn new(addr: SocketAddr) -> Self {
-        Self {
-            id: NodeId::from_address(&addr),
-            addr,
-        }
+        Self { addr }
     }
 }
 
@@ -27,25 +22,18 @@ impl NodeInfo {
 pub enum Request {
     /// Ping to check if node is alive
     Ping,
-    
-    /// Find the successor of a given ID
-    FindSuccessor { id: NodeId },
-    
+    /// Find the successor of a given address
+    FindSuccessor { addr: SocketAddr },
     /// Get this node's predecessor
     GetPredecessor,
-    
     /// Notify node that we might be its predecessor
     Notify { node: NodeInfo },
-    
     /// Join the ring via this node
     Join { node: NodeInfo },
-    
     /// Store a key-value pair
     Put { key: String, value: String },
-    
     /// Retrieve a value by key
     Get { key: String },
-    
     /// Delete a key
     Delete { key: String },
 }
@@ -55,19 +43,14 @@ pub enum Request {
 pub enum Response {
     /// Pong response to Ping
     Pong,
-    
-    /// The successor node for a given ID
+    /// The successor node for a given address
     Successor(NodeInfo),
-    
     /// The predecessor node (if any)
     Predecessor(Option<NodeInfo>),
-    
     /// Acknowledgment (for Notify, Join)
     Ok,
-    
     /// Value for a key (None if not found)
     Value(Option<String>),
-    
     /// Error response
     Error(String),
 }

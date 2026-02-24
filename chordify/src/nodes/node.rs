@@ -9,14 +9,13 @@ use tokio::sync::RwLock;
 use tracing::{info, debug, warn};
 
 use crate::communication::{Peer, connect};
-use super::{NodeId, Request, Response};
+use super::{Request, Response};
 use super::protocol::NodeInfo;
 
 /// A Chord DHT node
 pub struct Node {
-    /// This node's info (ID + address)
+    /// This node's info (address only)
     info: NodeInfo,
-    
     /// Shared mutable state
     state: Arc<RwLock<NodeState>>,
 }
@@ -25,10 +24,8 @@ pub struct Node {
 struct NodeState {
     /// Our successor in the ring
     successor: Option<NodeInfo>,
-    
     /// Our predecessor in the ring
     predecessor: Option<NodeInfo>,
-    
     /// Local key-value storage
     data: HashMap<String, String>,
 }
@@ -42,14 +39,8 @@ impl Node {
             predecessor: None,
             data: HashMap::new(),
         }));
-        
-        info!("Node created: {} at {}", info.id, info.addr);
+        info!("Node created at {}", info.addr);
         Self { info, state }
-    }
-
-    /// Get this node's ID
-    pub fn id(&self) -> NodeId {
-        self.info.id
     }
 
     /// Get this node's address
@@ -67,22 +58,20 @@ impl Node {
         let mut state = self.state.write().await;
         state.successor = Some(self.info.clone());
         state.predecessor = Some(self.info.clone());
-        info!("Created new ring, node {} is alone", self.info.id);
+        info!("Created new ring, node is alone at {}", self.info.addr);
     }
 
     /// Join an existing ring via a known node
     pub async fn join(&self, known_addr: SocketAddr) -> anyhow::Result<()> {
         info!("Joining ring via {}", known_addr);
-        
         // Ask known node to find our successor
-        let request = Request::FindSuccessor { id: self.info.id };
+        let request = Request::FindSuccessor { addr: self.info.addr };
         let response = self.send_request(known_addr, request).await?;
-        
         match response {
             Response::Successor(successor) => {
                 let mut state = self.state.write().await;
                 state.successor = Some(successor.clone());
-                info!("Joined ring, successor is {} at {}", successor.id, successor.addr);
+                info!("Joined ring, successor is at {}", successor.addr);
                 Ok(())
             }
             Response::Error(e) => Err(anyhow::anyhow!("Join failed: {}", e)),
@@ -95,7 +84,6 @@ impl Node {
         let peer = Peer::bind(self.info.addr).await?;
         let state = Arc::clone(&self.state);
         let info = self.info.clone();
-
         peer.listen(move |request_bytes, from| {
             let state = Arc::clone(&state);
             let info = info.clone();
@@ -112,21 +100,18 @@ impl Node {
         Response::from_bytes(&response_bytes)
     }
 
-    /// Find the successor of a given ID
-    pub async fn find_successor(&self, id: NodeId) -> anyhow::Result<NodeInfo> {
+    /// Find the successor of a given address
+    pub async fn find_successor(&self, addr: SocketAddr) -> anyhow::Result<NodeInfo> {
         let state = self.state.read().await;
-        
         if let Some(ref successor) = state.successor {
-            // Check if id is between us and our successor
-            if id.is_between(&self.info.id, &successor.id) || self.info.id == successor.id {
+            // If we're the only node or successor is us, return successor
+            if successor.addr == self.info.addr {
                 return Ok(successor.clone());
             }
-            
             // Otherwise, forward the query to our successor
             drop(state);
-            let request = Request::FindSuccessor { id };
+            let request = Request::FindSuccessor { addr };
             let response = self.send_request(successor.addr, request).await?;
-            
             match response {
                 Response::Successor(node) => Ok(node),
                 Response::Error(e) => Err(anyhow::anyhow!("{}", e)),
@@ -150,10 +135,8 @@ impl Node {
 
     /// Store a key-value pair (stores locally if we're responsible)
     pub async fn put(&self, key: String, value: String) -> anyhow::Result<()> {
-        let key_id = NodeId::from_key(&key);
-        let successor = self.find_successor(key_id).await?;
-        
-        if successor.id == self.info.id {
+        let successor = self.find_successor(self.info.addr).await?;
+        if successor.addr == self.info.addr {
             // We're responsible for this key
             let mut state = self.state.write().await;
             state.data.insert(key.clone(), value);
@@ -173,10 +156,8 @@ impl Node {
 
     /// Get a value by key
     pub async fn get(&self, key: &str) -> anyhow::Result<Option<String>> {
-        let key_id = NodeId::from_key(key);
-        let successor = self.find_successor(key_id).await?;
-        
-        if successor.id == self.info.id {
+        let successor = self.find_successor(self.info.addr).await?;
+        if successor.addr == self.info.addr {
             // We're responsible for this key
             let state = self.state.read().await;
             Ok(state.data.get(key).cloned())
@@ -202,49 +183,43 @@ async fn handle_request(
 ) -> anyhow::Result<Vec<u8>> {
     let request = Request::from_bytes(&request_bytes)?;
     debug!("Received {:?} from {}", request, from);
-
     let response = match request {
         Request::Ping => Response::Pong,
-        
-        Request::FindSuccessor { id } => {
+        Request::FindSuccessor { addr } => {
             let state_guard = state.read().await;
             if let Some(ref successor) = state_guard.successor {
-                if id.is_between(&info.id, &successor.id) || info.id == successor.id {
+                if successor.addr == info.addr {
                     Response::Successor(successor.clone())
                 } else {
-                    // Would need to forward, but for simplicity return our successor
                     Response::Successor(successor.clone())
                 }
             } else {
                 Response::Successor(info.clone())
             }
         }
-        
         Request::GetPredecessor => {
             let state_guard = state.read().await;
             Response::Predecessor(state_guard.predecessor.clone())
         }
-        
         Request::Notify { node } => {
             let mut state_guard = state.write().await;
             // Update predecessor if needed
             if state_guard.predecessor.is_none() {
                 state_guard.predecessor = Some(node.clone());
-                info!("Set predecessor to {}", node.id);
+                info!("Set predecessor to {}", node.addr);
             } else if let Some(ref pred) = state_guard.predecessor {
-                if node.id.is_between(&pred.id, &info.id) {
+                if node.addr != pred.addr {
                     state_guard.predecessor = Some(node.clone());
-                    info!("Updated predecessor to {}", node.id);
+                    info!("Updated predecessor to {}", node.addr);
                 }
             }
             Response::Ok
         }
-        
         Request::Join { node } => {
             // Find successor for the joining node
             let state_guard = state.read().await;
             if let Some(ref successor) = state_guard.successor {
-                if node.id.is_between(&info.id, &successor.id) || info.id == successor.id {
+                if successor.addr == info.addr {
                     Response::Successor(successor.clone())
                 } else {
                     Response::Successor(successor.clone())
@@ -253,19 +228,16 @@ async fn handle_request(
                 Response::Successor(info.clone())
             }
         }
-        
         Request::Put { key, value } => {
             let mut state_guard = state.write().await;
             state_guard.data.insert(key.clone(), value);
             debug!("Stored key '{}'", key);
             Response::Ok
         }
-        
         Request::Get { key } => {
             let state_guard = state.read().await;
             Response::Value(state_guard.data.get(&key).cloned())
         }
-        
         Request::Delete { key } => {
             let mut state_guard = state.write().await;
             state_guard.data.remove(&key);
@@ -273,6 +245,5 @@ async fn handle_request(
             Response::Ok
         }
     };
-
     response.to_bytes()
 }
