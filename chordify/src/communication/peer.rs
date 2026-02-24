@@ -20,20 +20,28 @@
 //! # Usage
 //!
 //! **Listening for connections (responder side):**
-//! ```ignore
-//! let peer = Peer::bind("127.0.0.1:8000").await?;
-//! peer.listen(|request, from| async move {
-//!     // process request bytes, return response bytes
-//!     Ok(request) // echo example
-//! }).await?;
+//! ```rust,no_run
+//! # tokio::main
+//! async fn main() -> anyhow::Result<()> {
+//!     let peer = Peer::bind("127.0.0.1:8000".parse().unwrap()).await?;
+//!     peer.listen(|request, from| async move {
+//!         // process request bytes, return response bytes
+//!         Ok(request) // echo example
+//!     }).await?;
+//!     Ok(())
+//! }
 //! ```
 //!
 //! **Sending a message and getting response (initiator side):**
-//! ```ignore
-//! let response = connect("127.0.0.1:8000")
-//!     .await?
-//!     .message(b"hello")
-//!     .await?;
+//! ```rust,no_run
+//! # tokio::main
+//! async fn main() -> anyhow::Result<()> {
+//!     let response = connect("127.0.0.1:8000".parse().unwrap())
+//!         .await?
+//!         .message(b"hello")
+//!         .await?;
+//!     Ok(())
+//! }
 //! ```
 //!
 //! # Message Framing

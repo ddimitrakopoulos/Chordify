@@ -40,11 +40,34 @@ async fn test_connect_message_response() {
     let response = connect(server_addr)
         .await
         .unwrap()
-        .message(b"Hello, peer!")
+        .message(b"hello world")
         .await
         .unwrap();
     
-    assert_eq!(response, b"Hello, peer!");
+    assert_eq!(response, b"hello world");
+}
+
+#[tokio::test]
+async fn test_connect_send_fire_and_forget() {
+    let server_addr = get_test_addr(19011);
+    
+    // Start peer with handler that just logs
+    tokio::spawn(async move {
+        let peer = Peer::bind(server_addr).await.unwrap();
+        let _ = peer.listen(|request, _from| async move {
+            assert_eq!(request, b"fire-and-forget");
+            Ok(Vec::new())
+        }).await;
+    });
+    
+    sleep(Duration::from_millis(100)).await;
+    
+    let _ = connect(server_addr)
+        .await
+        .unwrap()
+        .send(b"fire-and-forget")
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
