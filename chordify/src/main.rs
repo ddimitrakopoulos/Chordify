@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Create the node
     let node = Node::new(addr);
-    info!("Node ID: {} at {}", node.id(), node.addr());
+    info!("Node at {}", node.addr());
 
     // Join existing ring or create new one
     if let Some(known_addr) = join_addr {
