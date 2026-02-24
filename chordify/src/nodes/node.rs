@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, debug, warn};
+use tracing::{info, debug};
 
 use crate::communication::{Peer, connect};
 use super::protocol::{Request, Response, NodeInfo};
@@ -185,7 +185,7 @@ async fn handle_request(
     debug!("Received {:?} from {}", request, from);
     let response = match request {
         Request::Ping => Response::Pong,
-        Request::FindSuccessor { addr } => {
+        Request::FindSuccessor { addr: _ } => {
             let state_guard = state.read().await;
             if let Some(ref successor) = state_guard.successor {
                 if successor.addr == info.addr {
@@ -215,7 +215,7 @@ async fn handle_request(
             }
             Response::Ok
         }
-        Request::Join { node } => {
+        Request::Join { node: _ } => {
             // Find successor for the joining node
             let state_guard = state.read().await;
             if let Some(ref successor) = state_guard.successor {
