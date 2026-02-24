@@ -1,6 +1,6 @@
 //! Tests for NodeId - SHA-1 based node identification
 
-use chordify::communication::NodeId;
+use chordify::NodeId;
 use std::net::SocketAddr;
 
 // ==================== Hash Determinism Tests ====================

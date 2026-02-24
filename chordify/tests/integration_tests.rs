@@ -1,6 +1,6 @@
 //! Integration tests for Server and Client communication
 
-use chordify::communication::{Server, Client, NodeId};
+use chordify::{Server, Client, NodeId};
 use chordify::communication::protocol::NodeInfo;
 use std::net::SocketAddr;
 use std::time::Duration;

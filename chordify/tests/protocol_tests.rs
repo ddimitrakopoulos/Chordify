@@ -1,7 +1,7 @@
 //! Tests for Message Protocol - serialization and message types
 
 use chordify::communication::protocol::{Message, MessagePayload, Request, Response, NodeInfo};
-use chordify::communication::NodeId;
+use chordify::NodeId;
 use std::net::SocketAddr;
 
 // ==================== Message Serialization Tests ====================
