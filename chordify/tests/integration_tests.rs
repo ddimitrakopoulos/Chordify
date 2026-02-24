@@ -223,3 +223,89 @@ async fn test_handler_can_process_request() {
     
     assert_eq!(response, b"olleh");
 }
+
+// ==================== Node (Chord DHT) Tests ====================
+
+use chordify::nodes::{Node, Request, Response};
+
+#[tokio::test]
+async fn test_node_create_ring() {
+    let addr = get_test_addr(20000);
+    let node = Node::new(addr);
+    node.create_ring().await;
+
+    // After creating a ring, successor and predecessor should be self
+    let successor = node.get_successor().await.unwrap();
+    let predecessor = node.get_predecessor().await.unwrap();
+    assert_eq!(successor.addr, addr);
+    assert_eq!(predecessor.addr, addr);
+}
+
+#[tokio::test]
+async fn test_node_put_get_single_node() {
+    let addr = get_test_addr(20010);
+    let node = Node::new(addr);
+    node.create_ring().await;
+
+    // Put and get a value
+    node.put("foo".to_string(), "bar".to_string()).await.unwrap();
+    let value = node.get("foo").await.unwrap();
+    assert_eq!(value, Some("bar".to_string()));
+
+    // Get a non-existent key
+    let missing = node.get("missing").await.unwrap();
+    assert_eq!(missing, None);
+}
+
+#[tokio::test]
+async fn test_node_find_successor_single_node() {
+    let addr = get_test_addr(20020);
+    let node = Node::new(addr);
+    node.create_ring().await;
+
+    let successor = node.find_successor(addr).await.unwrap();
+    assert_eq!(successor.addr, addr);
+}
+
+#[tokio::test]
+async fn test_node_run_and_ping() {
+    let addr = get_test_addr(20030);
+    let node = Node::new(addr);
+    node.create_ring().await;
+
+    // Start node in background
+    tokio::spawn(async move {
+        let _ = node.run().await;
+    });
+
+    sleep(Duration::from_millis(300)).await;
+
+    // Send a Ping request directly
+    let request = Request::Ping;
+    let request_bytes = request.to_bytes().unwrap();
+    let response_bytes = connect(addr).await.unwrap().message(&request_bytes).await.unwrap();
+    let response = Response::from_bytes(&response_bytes).unwrap();
+    assert!(matches!(response, Response::Pong));
+}
+
+#[tokio::test]
+async fn test_node_run_and_get_predecessor() {
+    let addr = get_test_addr(20040);
+    let node = Node::new(addr);
+    node.create_ring().await;
+
+    tokio::spawn(async move {
+        let _ = node.run().await;
+    });
+
+    sleep(Duration::from_millis(300)).await;
+
+    let request = Request::GetPredecessor;
+    let request_bytes = request.to_bytes().unwrap();
+    let response_bytes = connect(addr).await.unwrap().message(&request_bytes).await.unwrap();
+    let response = Response::from_bytes(&response_bytes).unwrap();
+    match response {
+        Response::Predecessor(Some(pred)) => assert_eq!(pred.addr, addr),
+        _ => panic!("Expected Predecessor response"),
+    }
+}
