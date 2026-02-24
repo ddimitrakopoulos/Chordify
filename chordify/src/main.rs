@@ -10,7 +10,6 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use communication::Peer;
-use nodes::NodeId;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -27,36 +26,15 @@ async fn main() -> anyhow::Result<()> {
         .parse()?;
 
     info!("Starting Chordify peer at {}", addr);
-    info!("Node ID: {}", NodeId::from_address(&addr));
 
-    // Create peer and start listening
-    let peer = Peer::new(addr);
+    // Bind and start listening
+    let peer = Peer::bind(addr).await?;
     
-    // Handle incoming connections
-    peer.listen(|mut conn| async move {
-        info!("New connection from {}", conn.peer_addr());
-        
-        // Simple echo handler for demonstration
-        loop {
-            match conn.receive().await {
-                Ok(Some(data)) => {
-                    info!("Received {} bytes from {}", data.len(), conn.peer_addr());
-                    // Echo back
-                    if let Err(e) = conn.answer(&data).await {
-                        info!("Error sending response: {}", e);
-                        break;
-                    }
-                }
-                Ok(None) => {
-                    info!("Connection closed by {}", conn.peer_addr());
-                    break;
-                }
-                Err(e) => {
-                    info!("Error receiving: {}", e);
-                    break;
-                }
-            }
-        }
+    // Handle incoming messages with echo response
+    peer.listen(|request, from| async move {
+        info!("Received {} bytes from {}", request.len(), from);
+        // Echo back the request as the response
+        Ok(request)
     }).await?;
 
     Ok(())

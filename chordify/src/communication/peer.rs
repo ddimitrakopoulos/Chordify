@@ -1,27 +1,49 @@
 //! P2P Peer Communication
 //!
-//! This module implements a general-purpose peer-to-peer communication layer.
-//! Peers are identified by their IP address and port (SocketAddr).
+//! A general-purpose peer-to-peer communication layer.
+//! Peers are identified only by their IP address and port (SocketAddr).
 //! All nodes are equal; there is no client/server distinction.
 //!
-//! # Primitives
-//! - `Peer`: Represents this node, listens for incoming connections.
-//! - `Connection`: A bidirectional connection to another peer.
-//! - `connect`: Establish a connection to a remote peer.
-//! - `send`: Send a message (raw bytes) to a connected peer.
-//! - `receive`: Receive a message (raw bytes) from a connected peer.
-//! - `answer`: Send a response message back to the sender.
+//! # Architecture: Connect → Message → Response
+//!
+//! ```text
+//! Peer A                          Peer B
+//!   |                               |
+//!   |-------- connect() ----------->|  (establish connection)
+//!   |                               |
+//!   |-------- message() ----------->|  (send request bytes)
+//!   |                               |
+//!   |<------- response() -----------|  (receive response bytes)
+//!   |                               |
+//! ```
+//!
+//! # Usage
+//!
+//! **Listening for connections (responder side):**
+//! ```ignore
+//! let peer = Peer::bind("127.0.0.1:8000").await?;
+//! peer.listen(|request, from| async move {
+//!     // process request bytes, return response bytes
+//!     Ok(request) // echo example
+//! }).await?;
+//! ```
+//!
+//! **Sending a message and getting response (initiator side):**
+//! ```ignore
+//! let response = connect("127.0.0.1:8000")
+//!     .await?
+//!     .message(b"hello")
+//!     .await?;
+//! ```
 //!
 //! # Message Framing
 //! Messages are length-prefixed (4 bytes, big-endian u32) followed by raw bytes.
 //! Serialization/deserialization is the caller's responsibility.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::RwLock;
 use tracing::{info, error, debug};
 
 /// Maximum message size (16 MB)
@@ -30,54 +52,54 @@ const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 /// Default connection timeout
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Represents this node as a peer in the P2P network.
-/// Listens for incoming connections and manages local state.
-pub struct Peer {
-    /// This peer's address (IP:port)
-    addr: SocketAddr,
-    /// Shared state for custom data (optional, for higher layers)
-    state: Arc<RwLock<PeerState>>,
-}
+// ============================================================================
+// Peer - Listens for incoming connections and handles requests
+// ============================================================================
 
-/// Shared state for a peer (extensible for higher layers)
-pub struct PeerState {
-    pub addr: SocketAddr,
-    // Higher layers can add more fields as needed
+/// A peer in the P2P network that listens for incoming connections.
+pub struct Peer {
+    listener: TcpListener,
+    addr: SocketAddr,
 }
 
 impl Peer {
-    /// Create a new peer bound to the given address.
-    pub fn new(addr: SocketAddr) -> Self {
-        let state = Arc::new(RwLock::new(PeerState { addr }));
-        Self { addr, state }
+    /// Bind to an address and create a new peer ready to accept connections.
+    pub async fn bind(addr: SocketAddr) -> anyhow::Result<Self> {
+        let listener = TcpListener::bind(addr).await?;
+        let local_addr = listener.local_addr()?;
+        info!("Peer bound to {}", local_addr);
+        Ok(Self { listener, addr: local_addr })
     }
 
-    /// Get this peer's address.
+    /// Get this peer's bound address.
     pub fn addr(&self) -> SocketAddr {
         self.addr
     }
 
-    /// Get a clone of the shared state for external use.
-    pub fn state(&self) -> Arc<RwLock<PeerState>> {
-        Arc::clone(&self.state)
-    }
-
-    /// Start listening for incoming connections.
-    /// For each incoming connection, calls the provided handler with a Connection.
+    /// Listen for incoming connections and handle each request.
+    /// 
+    /// The handler receives:
+    /// - `request`: The raw bytes of the incoming message
+    /// - `from`: The SocketAddr of the sender
+    /// 
+    /// The handler returns the response bytes to send back.
     pub async fn listen<F, Fut>(&self, handler: F) -> anyhow::Result<()>
     where
-        F: Fn(Connection) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
+        F: Fn(Vec<u8>, SocketAddr) -> Fut + Send + Sync + Clone + 'static,
+        Fut: std::future::Future<Output = anyhow::Result<Vec<u8>>> + Send + 'static,
     {
-        let listener = TcpListener::bind(self.addr).await?;
-        info!("Peer listening on {}", self.addr);
+        info!("Listening for connections on {}", self.addr);
 
         loop {
-            match listener.accept().await {
-                Ok((socket, peer_addr)) => {
-                    debug!("Accepted connection from {}", peer_addr);
-                    let conn = Connection::from_stream(socket, peer_addr);
-                    tokio::spawn(handler(conn));
+            match self.listener.accept().await {
+                Ok((stream, peer_addr)) => {
+                    debug!("Connection from {}", peer_addr);
+                    let handler = handler.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_connection(stream, peer_addr, handler).await {
+                            error!("Error handling connection from {}: {}", peer_addr, e);
+                        }
+                    });
                 }
                 Err(e) => {
                     error!("Failed to accept connection: {}", e);
@@ -87,80 +109,107 @@ impl Peer {
     }
 }
 
-/// A bidirectional connection to another peer.
-/// Provides send, receive, and answer primitives.
+/// Handle a single incoming connection: receive message, call handler, send response.
+async fn handle_connection<F, Fut>(
+    mut stream: TcpStream,
+    peer_addr: SocketAddr,
+    handler: F,
+) -> anyhow::Result<()>
+where
+    F: Fn(Vec<u8>, SocketAddr) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Vec<u8>>>,
+{
+    // Receive the request
+    let request = receive_bytes(&mut stream).await?;
+    debug!("Received {} bytes from {}", request.len(), peer_addr);
+
+    // Process and get response
+    let response = handler(request, peer_addr).await?;
+
+    // Send the response back
+    send_bytes(&mut stream, &response).await?;
+    debug!("Sent {} bytes response to {}", response.len(), peer_addr);
+
+    Ok(())
+}
+
+// ============================================================================
+// Connection - Initiates connection and sends messages
+// ============================================================================
+
+/// An outgoing connection to another peer.
+/// Used to send a message and receive a response.
 pub struct Connection {
     stream: TcpStream,
     peer_addr: SocketAddr,
 }
 
+/// Connect to a remote peer by address.
+pub async fn connect(addr: SocketAddr) -> anyhow::Result<Connection> {
+    connect_with_timeout(addr, DEFAULT_TIMEOUT).await
+}
+
+/// Connect to a remote peer with a custom timeout.
+pub async fn connect_with_timeout(addr: SocketAddr, timeout: Duration) -> anyhow::Result<Connection> {
+    let stream = tokio::time::timeout(timeout, TcpStream::connect(addr))
+        .await
+        .map_err(|_| anyhow::anyhow!("Connection timeout to {}", addr))??;
+    debug!("Connected to {}", addr);
+    Ok(Connection { stream, peer_addr: addr })
+}
+
 impl Connection {
-    /// Create a Connection from an existing TcpStream.
-    pub fn from_stream(stream: TcpStream, peer_addr: SocketAddr) -> Self {
-        Self { stream, peer_addr }
-    }
-
-    /// Connect to a remote peer by address.
-    pub async fn connect(addr: SocketAddr) -> anyhow::Result<Self> {
-        Self::connect_with_timeout(addr, DEFAULT_TIMEOUT).await
-    }
-
-    /// Connect to a remote peer with a custom timeout.
-    pub async fn connect_with_timeout(addr: SocketAddr, timeout: Duration) -> anyhow::Result<Self> {
-        let stream = tokio::time::timeout(timeout, TcpStream::connect(addr))
-            .await
-            .map_err(|_| anyhow::anyhow!("Connection timeout"))??;
-        Ok(Self { stream, peer_addr: addr })
-    }
-
     /// Get the remote peer's address.
     pub fn peer_addr(&self) -> SocketAddr {
         self.peer_addr
     }
 
-    /// Send a message (raw bytes) to the connected peer.
-    /// Message is length-prefixed (4 bytes, big-endian).
-    pub async fn send(&mut self, data: &[u8]) -> anyhow::Result<()> {
-        let len = data.len() as u32;
-        self.stream.write_all(&len.to_be_bytes()).await?;
-        self.stream.write_all(data).await?;
-        self.stream.flush().await?;
+    /// Send a message and wait for the response.
+    /// This is the primary way to communicate: message in, response out.
+    pub async fn message(mut self, data: &[u8]) -> anyhow::Result<Vec<u8>> {
+        // Send the message
+        send_bytes(&mut self.stream, data).await?;
         debug!("Sent {} bytes to {}", data.len(), self.peer_addr);
+
+        // Wait for response
+        let response = receive_bytes(&mut self.stream).await?;
+        debug!("Received {} bytes response from {}", response.len(), self.peer_addr);
+
+        Ok(response)
+    }
+
+    /// Send a message without waiting for a response (fire-and-forget).
+    pub async fn send(mut self, data: &[u8]) -> anyhow::Result<()> {
+        send_bytes(&mut self.stream, data).await?;
+        debug!("Sent {} bytes to {} (no response expected)", data.len(), self.peer_addr);
         Ok(())
     }
+}
 
-    /// Receive a message (raw bytes) from the connected peer.
-    /// Returns None if the connection is closed.
-    pub async fn receive(&mut self) -> anyhow::Result<Option<Vec<u8>>> {
-        let mut len_buf = [0u8; 4];
-        match self.stream.read_exact(&mut len_buf).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                debug!("Connection closed by {}", self.peer_addr);
-                return Ok(None);
-            }
-            Err(e) => return Err(e.into()),
-        }
-        let msg_len = u32::from_be_bytes(len_buf) as usize;
-        if msg_len > MAX_MESSAGE_SIZE {
-            return Err(anyhow::anyhow!("Message too large: {} bytes", msg_len));
-        }
-        let mut buf = vec![0u8; msg_len];
-        self.stream.read_exact(&mut buf).await?;
-        debug!("Received {} bytes from {}", msg_len, self.peer_addr);
-        Ok(Some(buf))
-    }
+// ============================================================================
+// Wire Protocol - Length-prefixed message framing
+// ============================================================================
 
-    /// Answer (send a response) to the connected peer.
-    /// This is semantically the same as send, but named for clarity.
-    pub async fn answer(&mut self, data: &[u8]) -> anyhow::Result<()> {
-        self.send(data).await
-    }
+/// Send length-prefixed bytes over a stream.
+async fn send_bytes(stream: &mut TcpStream, data: &[u8]) -> anyhow::Result<()> {
+    let len = data.len() as u32;
+    stream.write_all(&len.to_be_bytes()).await?;
+    stream.write_all(data).await?;
+    stream.flush().await?;
+    Ok(())
+}
 
-    /// Close the connection gracefully.
-    pub async fn close(mut self) -> anyhow::Result<()> {
-        self.stream.shutdown().await?;
-        debug!("Closed connection to {}", self.peer_addr);
-        Ok(())
+/// Receive length-prefixed bytes from a stream.
+async fn receive_bytes(stream: &mut TcpStream) -> anyhow::Result<Vec<u8>> {
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).await?;
+    
+    let msg_len = u32::from_be_bytes(len_buf) as usize;
+    if msg_len > MAX_MESSAGE_SIZE {
+        return Err(anyhow::anyhow!("Message too large: {} bytes", msg_len));
     }
+    
+    let mut buf = vec![0u8; msg_len];
+    stream.read_exact(&mut buf).await?;
+    Ok(buf)
 }
