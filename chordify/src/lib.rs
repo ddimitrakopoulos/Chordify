@@ -12,4 +12,4 @@ pub mod nodes;
 
 // Re-export commonly used types
 pub use communication::{Peer, Connection, connect, connect_with_timeout};
-pub use nodes::{Node, Protocol};
+pub use nodes::{Node, NodeInfo, Request, Response};

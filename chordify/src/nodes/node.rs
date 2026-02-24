@@ -9,8 +9,7 @@ use tokio::sync::RwLock;
 use tracing::{info, debug, warn};
 
 use crate::communication::{Peer, connect};
-use super::{Request, Response};
-use super::protocol::NodeInfo;
+use super::protocol::{Request, Response, NodeInfo};
 
 /// A Chord DHT node
 pub struct Node {
@@ -108,10 +107,11 @@ impl Node {
             if successor.addr == self.info.addr {
                 return Ok(successor.clone());
             }
-            // Otherwise, forward the query to our successor
+            // Copy successor address before dropping state
+            let successor_addr = successor.addr;
             drop(state);
             let request = Request::FindSuccessor { addr };
-            let response = self.send_request(successor.addr, request).await?;
+            let response = self.send_request(successor_addr, request).await?;
             match response {
                 Response::Successor(node) => Ok(node),
                 Response::Error(e) => Err(anyhow::anyhow!("{}", e)),
