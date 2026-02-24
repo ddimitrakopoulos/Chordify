@@ -34,7 +34,7 @@ async fn test_connect_message_response() {
     });
     
     // Wait for server to start
-    sleep(Duration::from_millis(100)).await;
+    sleep(Duration::from_millis(300)).await;
     
     // Connect, send message, get response
     let response = connect(server_addr)
@@ -60,7 +60,7 @@ async fn test_connect_send_fire_and_forget() {
         }).await;
     });
     
-    sleep(Duration::from_millis(100)).await;
+    sleep(Duration::from_millis(300)).await;
     
     let _ = connect(server_addr)
         .await
@@ -81,7 +81,7 @@ async fn test_multiple_sequential_requests() {
         }).await;
     });
     
-    sleep(Duration::from_millis(100)).await;
+    sleep(Duration::from_millis(300)).await;
     
     // Each message creates a new connection (stateless)
     for i in 0..5 {
@@ -122,7 +122,7 @@ async fn test_large_message() {
         }).await;
     });
     
-    sleep(Duration::from_millis(100)).await;
+    sleep(Duration::from_millis(300)).await;
     
     // Send a large message (1 MB)
     let msg = vec![42u8; 1024 * 1024];
@@ -148,7 +148,7 @@ async fn test_concurrent_connections() {
         }).await;
     });
     
-    sleep(Duration::from_millis(100)).await;
+    sleep(Duration::from_millis(300)).await;
     
     // Spawn multiple concurrent connections
     let mut handles = vec![];
@@ -183,7 +183,7 @@ async fn test_handler_receives_sender_address() {
         }).await;
     });
     
-    sleep(Duration::from_millis(100)).await;
+    sleep(Duration::from_millis(300)).await;
     
     let response = connect(server_addr)
         .await
@@ -212,7 +212,7 @@ async fn test_handler_can_process_request() {
         }).await;
     });
     
-    sleep(Duration::from_millis(100)).await;
+    sleep(Duration::from_millis(300)).await;
     
     let response = connect(server_addr)
         .await
