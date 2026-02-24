@@ -41,6 +41,7 @@
 //! Serialization/deserialization is the caller's responsibility.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -85,16 +86,17 @@ impl Peer {
     /// The handler returns the response bytes to send back.
     pub async fn listen<F, Fut>(&self, handler: F) -> anyhow::Result<()>
     where
-        F: Fn(Vec<u8>, SocketAddr) -> Fut + Send + Sync + Clone + 'static,
+        F: Fn(Vec<u8>, SocketAddr) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = anyhow::Result<Vec<u8>>> + Send + 'static,
     {
         info!("Listening for connections on {}", self.addr);
 
+        let handler = Arc::new(handler);
         loop {
             match self.listener.accept().await {
                 Ok((stream, peer_addr)) => {
                     debug!("Connection from {}", peer_addr);
-                    let handler = handler.clone();
+                    let handler = Arc::clone(&handler);
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(stream, peer_addr, handler).await {
                             error!("Error handling connection from {}: {}", peer_addr, e);
@@ -103,6 +105,7 @@ impl Peer {
                 }
                 Err(e) => {
                     error!("Failed to accept connection: {}", e);
+                    // Optionally, break or return Err if fatal error
                 }
             }
         }
@@ -113,18 +116,18 @@ impl Peer {
 async fn handle_connection<F, Fut>(
     mut stream: TcpStream,
     peer_addr: SocketAddr,
-    handler: F,
+    handler: Arc<F>,
 ) -> anyhow::Result<()>
 where
-    F: Fn(Vec<u8>, SocketAddr) -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<Vec<u8>>>,
+    F: Fn(Vec<u8>, SocketAddr) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<Vec<u8>>> + Send + 'static,
 {
     // Receive the request
     let request = receive_bytes(&mut stream).await?;
     debug!("Received {} bytes from {}", request.len(), peer_addr);
 
     // Process and get response
-    let response = handler(request, peer_addr).await?;
+    let response = (handler)(request, peer_addr).await?;
 
     // Send the response back
     send_bytes(&mut stream, &response).await?;
