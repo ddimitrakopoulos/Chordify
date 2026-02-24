@@ -2,14 +2,11 @@
 //! 
 //! A peer-to-peer song sharing application using the Chord DHT protocol.
 
-mod communication;
-mod nodes;
-
 use std::net::SocketAddr;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use communication::Peer;
+use chordify::nodes::Node;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -19,24 +16,31 @@ async fn main() -> anyhow::Result<()> {
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
-    // Default address
-    let addr: SocketAddr = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "127.0.0.1:8000".to_string())
+    // Parse command line arguments
+    let args: Vec<String> = std::env::args().collect();
+    
+    let addr: SocketAddr = args.get(1)
+        .unwrap_or(&"127.0.0.1:8000".to_string())
         .parse()?;
 
-    info!("Starting Chordify peer at {}", addr);
+    let join_addr: Option<SocketAddr> = args.get(2)
+        .map(|s| s.parse())
+        .transpose()?;
 
-    // Bind and start listening
-    let peer = Peer::bind(addr).await?;
-    
-    // Handle incoming messages with echo response
-    peer.listen(|request, from| async move {
-        info!("Received {} bytes from {}", request.len(), from);
-        // Echo back the request as the response
-        Ok(request)
-    }).await?;
+    // Create the node
+    let node = Node::new(addr);
+    info!("Node ID: {} at {}", node.id(), node.addr());
 
-    Ok(())
+    // Join existing ring or create new one
+    if let Some(known_addr) = join_addr {
+        info!("Joining ring via {}", known_addr);
+        node.join(known_addr).await?;
+    } else {
+        info!("Creating new ring");
+        node.create_ring().await;
+    }
+
+    // Run the node (listens for requests)
+    node.run().await
 }
 
