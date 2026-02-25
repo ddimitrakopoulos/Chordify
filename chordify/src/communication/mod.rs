@@ -12,18 +12,6 @@
 //! - Peers are identified purely by their IP address and port (SocketAddr).
 //! - No client/server distinction: all nodes are equal peers.
 //! - Messages are raw bytes; serialization is the caller's responsibility.
-//!
-//! # Example
-//! ```ignore
-//! // Responder side
-//! let peer = Peer::bind("127.0.0.1:8000".parse()?).await?;
-//! peer.listen(|request, from| async move {
-//!     Ok(request) // echo
-//! }).await?;
-//!
-//! // Initiator side  
-//! let response = connect("127.0.0.1:8000".parse()?).await?.message(b"hello").await?;
-//! ```
 
 mod peer;
 

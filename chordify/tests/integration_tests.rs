@@ -309,3 +309,42 @@ async fn test_node_run_and_get_predecessor() {
         _ => panic!("Expected Predecessor response"),
     }
 }
+
+#[tokio::test]
+async fn test_nodes_specific_ports_and_responses() {
+    let ports = [20100, 20101, 20102];
+    let addrs: Vec<_> = ports.iter().map(|p| get_test_addr(*p)).collect();
+    let mut handles = vec![];
+
+    // Start nodes, each responds with message + " received"
+    for addr in &addrs {
+        let addr = *addr;
+        handles.push(tokio::spawn(async move {
+            let peer = Peer::bind(addr).await.unwrap();
+            let _ = peer.listen(|request, _from| async move {
+                let mut response = request.clone();
+                response.extend_from_slice(b" received");
+                Ok(response)
+            }).await;
+        }));
+    }
+    sleep(Duration::from_millis(300)).await;
+
+    // Test: send to each node, expect correct response
+    for addr in &addrs {
+        let msg = format!("hello from {}", addr.port());
+        let response = connect(*addr)
+            .await
+            .unwrap()
+            .message(msg.as_bytes())
+            .await
+            .unwrap();
+        let expected = [msg.as_bytes(), b" received"].concat();
+        assert_eq!(response, expected);
+    }
+
+    // Test: send to a port with no node listening
+    let unused_addr = get_test_addr(20199);
+    let result = connect(unused_addr).await;
+    assert!(result.is_err());
+}

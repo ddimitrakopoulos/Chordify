@@ -17,24 +17,6 @@
 //!   |                               |
 //! ```
 //!
-//! # Usage
-//!
-//! **Listening for connections (responder side):**
-//! ```ignore
-//! let peer = Peer::bind("127.0.0.1:8000".parse().unwrap()).await?;
-//! peer.listen(|request, _from| async move {
-//!     Ok(request) // echo
-//! }).await?;
-//! ```
-//!
-//! **Sending a message and getting response (initiator side):**
-//! ```ignore
-//! let response = connect("127.0.0.1:8000".parse().unwrap())
-//!     .await?
-//!     .message(b"hello")
-//!     .await?;
-//! ```
-//!
 //! # Message Framing
 //! Messages are length-prefixed (4 bytes, big-endian u32) followed by raw bytes.
 //! Serialization/deserialization is the caller's responsibility.
