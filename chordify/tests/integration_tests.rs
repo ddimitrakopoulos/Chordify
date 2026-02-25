@@ -5,6 +5,15 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::time::sleep;
 
+fn test_print(args: std::fmt::Arguments) {
+    if std::env::var("PRINT_TEST_OUTPUT").ok().as_deref() == Some("1") {
+        println!("{}", args);
+    }
+}
+macro_rules! tprintln {
+    ($($arg:tt)*) => { test_print(format_args!($($arg)*)) };
+}
+
 // Helper to get an available port for testing
 fn get_test_addr(port: u16) -> SocketAddr {
     format!("127.0.0.1:{}", port).parse().unwrap()
@@ -317,7 +326,7 @@ async fn test_nodes_specific_ports_and_responses() {
         tprintln!("Starting peer at {}", addr);
         handles.push(tokio::spawn(async move {
             let peer = Peer::bind(addr).await.unwrap();
-            let _ = peer.listen(|request, _from| async move {
+            let _ = peer.listen(move |request, _from| async move {
                 tprintln!("Peer {} received: {:?}", addr, request);
                 let mut response = request.clone();
                 response.extend_from_slice(b" received");
@@ -349,13 +358,4 @@ async fn test_nodes_specific_ports_and_responses() {
         tprintln!("Unexpectedly connected to {}", unused_addr);
     }
     assert!(result.is_err());
-}
-
-fn test_print(args: std::fmt::Arguments) {
-    if std::env::var("PRINT_TEST_OUTPUT").ok().as_deref() == Some("1") {
-        println!("{}", args);
-    }
-}
-macro_rules! tprintln {
-    ($($arg:tt)*) => { test_print(format_args!($($arg)*)) };
 }
