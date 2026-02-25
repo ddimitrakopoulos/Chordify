@@ -16,6 +16,7 @@ fn get_test_addr(port: u16) -> SocketAddr {
 async fn test_peer_bind() {
     let addr = get_test_addr(19000);
     let peer = Peer::bind(addr).await.unwrap();
+    tprintln!("Peer bound to {}", peer.addr());
     assert_eq!(peer.addr(), addr);
 }
 
@@ -24,44 +25,40 @@ async fn test_peer_bind() {
 #[tokio::test]
 async fn test_connect_message_response() {
     let server_addr = get_test_addr(19010);
-    
-    // Start peer with echo handler
+    tprintln!("Starting echo peer at {}", server_addr);
     tokio::spawn(async move {
         let peer = Peer::bind(server_addr).await.unwrap();
         let _ = peer.listen(|request, _from| async move {
             Ok(request) // echo
         }).await;
     });
-    
-    // Wait for server to start
     sleep(Duration::from_millis(300)).await;
-    
-    // Connect, send message, get response
+    let msg = b"hello world";
+    tprintln!("Sending message to {}: {:?}", server_addr, msg);
     let response = connect(server_addr)
         .await
         .unwrap()
-        .message(b"hello world")
+        .message(msg)
         .await
         .unwrap();
-    
-    assert_eq!(response, b"hello world");
+    tprintln!("Received response: {:?}", response);
+    assert_eq!(response, msg);
 }
 
 #[tokio::test]
 async fn test_connect_send_fire_and_forget() {
     let server_addr = get_test_addr(19011);
-    
-    // Start peer with handler that just logs
+    tprintln!("Starting fire-and-forget peer at {}", server_addr);
     tokio::spawn(async move {
         let peer = Peer::bind(server_addr).await.unwrap();
         let _ = peer.listen(|request, _from| async move {
+            tprintln!("Peer received: {:?}", request);
             assert_eq!(request, b"fire-and-forget");
             Ok(Vec::new())
         }).await;
     });
-    
     sleep(Duration::from_millis(300)).await;
-    
+    tprintln!("Sending fire-and-forget message to {}", server_addr);
     let _ = connect(server_addr)
         .await
         .unwrap()
@@ -315,36 +312,50 @@ async fn test_nodes_specific_ports_and_responses() {
     let ports = [20100, 20101, 20102];
     let addrs: Vec<_> = ports.iter().map(|p| get_test_addr(*p)).collect();
     let mut handles = vec![];
-
-    // Start nodes, each responds with message + " received"
     for addr in &addrs {
         let addr = *addr;
+        tprintln!("Starting peer at {}", addr);
         handles.push(tokio::spawn(async move {
             let peer = Peer::bind(addr).await.unwrap();
             let _ = peer.listen(|request, _from| async move {
+                tprintln!("Peer {} received: {:?}", addr, request);
                 let mut response = request.clone();
                 response.extend_from_slice(b" received");
+                tprintln!("Peer {} responding: {:?}", addr, response);
                 Ok(response)
             }).await;
         }));
     }
     sleep(Duration::from_millis(300)).await;
-
-    // Test: send to each node, expect correct response
     for addr in &addrs {
         let msg = format!("hello from {}", addr.port());
+        tprintln!("Sending to {}: {}", addr, msg);
         let response = connect(*addr)
             .await
             .unwrap()
             .message(msg.as_bytes())
             .await
             .unwrap();
+        tprintln!("Received from {}: {:?}", addr, response);
         let expected = [msg.as_bytes(), b" received"].concat();
         assert_eq!(response, expected);
     }
-
-    // Test: send to a port with no node listening
     let unused_addr = get_test_addr(20199);
+    tprintln!("Sending to unused port {}", unused_addr);
     let result = connect(unused_addr).await;
+    if result.is_err() {
+        tprintln!("No peer listening at {} (expected)", unused_addr);
+    } else {
+        tprintln!("Unexpectedly connected to {}", unused_addr);
+    }
     assert!(result.is_err());
+}
+
+fn test_print(args: std::fmt::Arguments) {
+    if std::env::var("PRINT_TEST_OUTPUT").ok().as_deref() == Some("1") {
+        println!("{}", args);
+    }
+}
+macro_rules! tprintln {
+    ($($arg:tt)*) => { test_print(format_args!($($arg)*)) };
 }
