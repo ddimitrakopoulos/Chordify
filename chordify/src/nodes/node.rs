@@ -17,6 +17,8 @@ pub struct Node {
     info: NodeInfo,
     /// Shared mutable state
     state: Arc<RwLock<NodeState>>,
+    /// Bootstrap node address (optional)
+    bootstrap_addr: Option<SocketAddr>,
 }
 
 /// Mutable state for a node
@@ -30,7 +32,7 @@ struct NodeState {
 }
 
 impl Node {
-    /// Create a new node bound to the given address
+    /// Create a new node bound to the given address, optionally with a bootstrap node
     pub fn new(addr: SocketAddr) -> Self {
         let info = NodeInfo::new(addr);
         let state = Arc::new(RwLock::new(NodeState {
@@ -39,7 +41,13 @@ impl Node {
             data: HashMap::new(),
         }));
         info!("Node created at {}", info.addr);
-        Self { info, state }
+        Self { info, state, bootstrap_addr: None }
+    }
+
+    /// Set bootstrap node address
+    pub fn with_bootstrap(mut self, bootstrap_addr: SocketAddr) -> Self {
+        self.bootstrap_addr = Some(bootstrap_addr);
+        self
     }
 
     /// Get this node's address
@@ -60,22 +68,119 @@ impl Node {
         info!("Created new ring, node is alone at {}", self.info.addr);
     }
 
-    /// Join an existing ring via a known node
+    /// Join an existing ring via a known node (or bootstrap node if set)
     pub async fn join(&self, known_addr: SocketAddr) -> anyhow::Result<()> {
-        info!("Joining ring via {}", known_addr);
-        // Ask known node to find our successor
+        let bootstrap = self.bootstrap_addr.unwrap_or(known_addr);
+        info!("Joining ring via {}", bootstrap);
+        
+        // Step 1: Ask known node to find our successor
         let request = Request::FindSuccessor { addr: self.info.addr };
-        let response = self.send_request(known_addr, request).await?;
-        match response {
-            Response::Successor(successor) => {
-                let mut state = self.state.write().await;
-                state.successor = Some(successor.clone());
-                info!("Joined ring, successor is at {}", successor.addr);
-                Ok(())
-            }
-            Response::Error(e) => Err(anyhow::anyhow!("Join failed: {}", e)),
-            _ => Err(anyhow::anyhow!("Unexpected response")),
+        let response = self.send_request(bootstrap, request).await?;
+        let successor = match response {
+            Response::Successor(s) => s,
+            Response::Error(e) => return Err(anyhow::anyhow!("Join failed: {}", e)),
+            _ => return Err(anyhow::anyhow!("Unexpected response")),
+        };
+        
+        // Step 2: Get predecessor from our new successor
+        let pred_response = self.send_request(successor.addr, Request::GetPredecessor).await?;
+        let predecessor = match pred_response {
+            Response::Predecessor(p) => p,
+            _ => None,
+        };
+        
+        // Step 3: Update our state
+        {
+            let mut state = self.state.write().await;
+            state.successor = Some(successor.clone());
+            state.predecessor = predecessor.clone();
         }
+        info!("Joined ring, successor is at {}", successor.addr);
+        
+        // Step 4: Tell successor we are its new predecessor
+        let _ = self.send_request(
+            successor.addr,
+            Request::SetPredecessor { node: self.info.clone() }
+        ).await;
+        
+        // Step 5: Tell predecessor (if any) we are its new successor
+        if let Some(ref pred) = predecessor {
+            if pred.addr != successor.addr {
+                let _ = self.send_request(
+                    pred.addr,
+                    Request::SetSuccessor { node: self.info.clone() }
+                ).await;
+            }
+        }
+        
+        // Step 6: Request key transfer from successor (keys we're now responsible for)
+        let keys_response = self.send_request(
+            successor.addr,
+            Request::TransferKeys { to_addr: self.info.addr }
+        ).await?;
+        if let Response::Keys(keys) = keys_response {
+            let mut state = self.state.write().await;
+            for (key, value) in keys {
+                state.data.insert(key, value);
+            }
+            info!("Received {} keys from successor", state.data.len());
+        }
+        
+        Ok(())
+    }
+
+    /// Graceful departure: notify neighbors and transfer keys before leaving
+    pub async fn depart(&self) -> anyhow::Result<()> {
+        let (successor, predecessor, keys) = {
+            let state = self.state.read().await;
+            (state.successor.clone(), state.predecessor.clone(), state.data.clone())
+        };
+        
+        info!("Node at {} departing, transferring {} keys", self.info.addr, keys.len());
+        
+        // Step 1: Transfer all keys to successor
+        if let Some(ref succ) = successor {
+            if succ.addr != self.info.addr {
+                for (key, value) in &keys {
+                    let request = Request::Put { key: key.clone(), value: value.clone() };
+                    let _ = self.send_request(succ.addr, request).await;
+                }
+                info!("Transferred {} keys to successor {}", keys.len(), succ.addr);
+            }
+        }
+        
+        // Step 2: Update successor's predecessor to our predecessor
+        if let Some(ref succ) = successor {
+            if succ.addr != self.info.addr {
+                let new_pred = predecessor.clone().unwrap_or(succ.clone());
+                let _ = self.send_request(
+                    succ.addr,
+                    Request::SetPredecessor { node: new_pred }
+                ).await;
+            }
+        }
+        
+        // Step 3: Update predecessor's successor to our successor
+        if let Some(ref pred) = predecessor {
+            if pred.addr != self.info.addr {
+                let new_succ = successor.clone().unwrap_or(pred.clone());
+                let _ = self.send_request(
+                    pred.addr,
+                    Request::SetSuccessor { node: new_succ }
+                ).await;
+            }
+        }
+        
+        // Clear local state
+        {
+            let mut state = self.state.write().await;
+            state.successor = None;
+            state.predecessor = None;
+            state.data.clear();
+        }
+        
+        info!("Node at {} departed gracefully", self.info.addr);
+        Ok(())
     }
 
     /// Start listening and handling requests
@@ -188,11 +293,7 @@ async fn handle_request(
         Request::FindSuccessor { addr: _ } => {
             let state_guard = state.read().await;
             if let Some(ref successor) = state_guard.successor {
-                if successor.addr == info.addr {
-                    Response::Successor(successor.clone())
-                } else {
-                    Response::Successor(successor.clone())
-                }
+                Response::Successor(successor.clone())
             } else {
                 Response::Successor(info.clone())
             }
@@ -200,6 +301,22 @@ async fn handle_request(
         Request::GetPredecessor => {
             let state_guard = state.read().await;
             Response::Predecessor(state_guard.predecessor.clone())
+        }
+        Request::GetSuccessor => {
+            let state_guard = state.read().await;
+            Response::Successor(state_guard.successor.clone().unwrap_or(info.clone()))
+        }
+        Request::SetPredecessor { node } => {
+            let mut state_guard = state.write().await;
+            state_guard.predecessor = Some(node.clone());
+            info!("Set predecessor to {}", node.addr);
+            Response::Ok
+        }
+        Request::SetSuccessor { node } => {
+            let mut state_guard = state.write().await;
+            state_guard.successor = Some(node.clone());
+            info!("Set successor to {}", node.addr);
+            Response::Ok
         }
         Request::Notify { node } => {
             let mut state_guard = state.write().await;
@@ -219,14 +336,18 @@ async fn handle_request(
             // Find successor for the joining node
             let state_guard = state.read().await;
             if let Some(ref successor) = state_guard.successor {
-                if successor.addr == info.addr {
-                    Response::Successor(successor.clone())
-                } else {
-                    Response::Successor(successor.clone())
-                }
+                Response::Successor(successor.clone())
             } else {
                 Response::Successor(info.clone())
             }
+        }
+        Request::TransferKeys { to_addr: _ } => {
+            // Transfer keys that the new node is now responsible for
+            // For simplicity, transfer all keys (proper implementation would check key ranges)
+            let mut state_guard = state.write().await;
+            let keys: Vec<(String, String)> = state_guard.data.drain().collect();
+            info!("Transferring {} keys to new node", keys.len());
+            Response::Keys(keys)
         }
         Request::Put { key, value } => {
             let mut state_guard = state.write().await;

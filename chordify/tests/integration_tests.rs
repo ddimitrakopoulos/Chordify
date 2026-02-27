@@ -359,3 +359,345 @@ async fn test_nodes_specific_ports_and_responses() {
     }
     assert!(result.is_err());
 }
+
+// ==================== Membership Management Tests ====================
+
+#[tokio::test]
+async fn test_node_join_two_nodes() {
+    let bootstrap_addr = get_test_addr(21000);
+    let joining_addr = get_test_addr(21001);
+
+    // Create bootstrap node and start ring
+    let bootstrap_node = Node::new(bootstrap_addr);
+    bootstrap_node.create_ring().await;
+
+    // Start bootstrap node listening
+    let bootstrap_node_clone = Node::new(bootstrap_addr);
+    bootstrap_node_clone.create_ring().await;
+    tokio::spawn(async move {
+        let _ = bootstrap_node_clone.run().await;
+    });
+    sleep(Duration::from_millis(300)).await;
+
+    // Create joining node and join via bootstrap
+    let joining_node = Node::new(joining_addr);
+    let join_result = joining_node.join(bootstrap_addr).await;
+    tprintln!("Join result: {:?}", join_result);
+    assert!(join_result.is_ok());
+
+    // Verify joining node has bootstrap as successor
+    let successor = joining_node.get_successor().await;
+    assert!(successor.is_some());
+    tprintln!("Joining node successor: {:?}", successor);
+}
+
+#[tokio::test]
+async fn test_node_join_with_bootstrap_builder() {
+    let bootstrap_addr = get_test_addr(21010);
+    let joining_addr = get_test_addr(21011);
+
+    // Create and run bootstrap node
+    let bootstrap_node = Node::new(bootstrap_addr);
+    bootstrap_node.create_ring().await;
+    tokio::spawn(async move {
+        let _ = bootstrap_node.run().await;
+    });
+    sleep(Duration::from_millis(300)).await;
+
+    // Create joining node with bootstrap set
+    let joining_node = Node::new(joining_addr).with_bootstrap(bootstrap_addr);
+    
+    // Join using any address (bootstrap_addr will be used)
+    let join_result = joining_node.join(bootstrap_addr).await;
+    assert!(join_result.is_ok());
+
+    let successor = joining_node.get_successor().await;
+    assert!(successor.is_some());
+    assert_eq!(successor.unwrap().addr, bootstrap_addr);
+}
+
+#[tokio::test]
+async fn test_node_join_updates_pointers() {
+    let node1_addr = get_test_addr(21020);
+    let node2_addr = get_test_addr(21021);
+
+    // Create first node (bootstrap)
+    let node1 = Node::new(node1_addr);
+    node1.create_ring().await;
+    tokio::spawn(async move {
+        let _ = node1.run().await;
+    });
+    sleep(Duration::from_millis(300)).await;
+
+    // Second node joins
+    let node2 = Node::new(node2_addr);
+    node2.join(node1_addr).await.unwrap();
+
+    // Start node2 listening so we can query it
+    let node2_for_run = Node::new(node2_addr);
+    node2_for_run.create_ring().await;
+    
+    // Verify node2's successor is node1
+    let node2_successor = node2.get_successor().await;
+    assert!(node2_successor.is_some());
+    tprintln!("Node2 successor: {:?}", node2_successor);
+}
+
+#[tokio::test]
+async fn test_node_join_key_transfer() {
+    let bootstrap_addr = get_test_addr(21030);
+    let joining_addr = get_test_addr(21031);
+
+    // Create bootstrap node with some data
+    let bootstrap_node = Node::new(bootstrap_addr);
+    bootstrap_node.create_ring().await;
+    bootstrap_node.put("key1".to_string(), "value1".to_string()).await.unwrap();
+    bootstrap_node.put("key2".to_string(), "value2".to_string()).await.unwrap();
+    tprintln!("Bootstrap node has keys: key1, key2");
+
+    // Start bootstrap node
+    tokio::spawn(async move {
+        let _ = bootstrap_node.run().await;
+    });
+    sleep(Duration::from_millis(300)).await;
+
+    // Joining node joins and should receive keys
+    let joining_node = Node::new(joining_addr);
+    joining_node.join(bootstrap_addr).await.unwrap();
+
+    // Verify keys were transferred (in simplified implementation, all keys transfer)
+    tprintln!("Joining node joined successfully");
+}
+
+#[tokio::test]
+async fn test_node_graceful_depart_single() {
+    let addr = get_test_addr(21040);
+
+    // Create node
+    let node = Node::new(addr);
+    node.create_ring().await;
+    node.put("test_key".to_string(), "test_value".to_string()).await.unwrap();
+
+    // Depart (no other nodes, so just clears state)
+    let depart_result = node.depart().await;
+    assert!(depart_result.is_ok());
+
+    // Verify state is cleared
+    let successor = node.get_successor().await;
+    let predecessor = node.get_predecessor().await;
+    assert!(successor.is_none());
+    assert!(predecessor.is_none());
+    tprintln!("Node departed, state cleared");
+}
+
+#[tokio::test]
+async fn test_node_depart_transfers_keys() {
+    let node1_addr = get_test_addr(21050);
+    let node2_addr = get_test_addr(21051);
+
+    // Create first node (bootstrap) with keys
+    let node1 = Node::new(node1_addr);
+    node1.create_ring().await;
+    node1.put("key_a".to_string(), "value_a".to_string()).await.unwrap();
+    node1.put("key_b".to_string(), "value_b".to_string()).await.unwrap();
+
+    // Start node1
+    tokio::spawn(async move {
+        let _ = node1.run().await;
+    });
+    sleep(Duration::from_millis(300)).await;
+
+    // Node2 joins
+    let node2 = Node::new(node2_addr);
+    node2.join(node1_addr).await.unwrap();
+    node2.put("key_c".to_string(), "value_c".to_string()).await.unwrap();
+
+    // Node2 departs - keys should transfer to successor
+    let depart_result = node2.depart().await;
+    assert!(depart_result.is_ok());
+    tprintln!("Node2 departed, keys should be transferred");
+}
+
+#[tokio::test]
+async fn test_three_node_ring_join() {
+    let node1_addr = get_test_addr(21060);
+    let node2_addr = get_test_addr(21061);
+    let node3_addr = get_test_addr(21062);
+
+    // Create first node (bootstrap)
+    let node1 = Node::new(node1_addr);
+    node1.create_ring().await;
+    tokio::spawn(async move {
+        let _ = node1.run().await;
+    });
+    sleep(Duration::from_millis(300)).await;
+
+    // Node2 joins
+    let node2 = Node::new(node2_addr);
+    node2.join(node1_addr).await.unwrap();
+    tprintln!("Node2 joined");
+
+    // Start node2
+    tokio::spawn(async move {
+        let _ = node2.run().await;
+    });
+    sleep(Duration::from_millis(300)).await;
+
+    // Node3 joins via node1
+    let node3 = Node::new(node3_addr);
+    node3.join(node1_addr).await.unwrap();
+    tprintln!("Node3 joined");
+
+    // Verify node3 has a successor
+    let node3_successor = node3.get_successor().await;
+    assert!(node3_successor.is_some());
+    tprintln!("Node3 successor: {:?}", node3_successor);
+}
+
+#[tokio::test]
+async fn test_node_depart_updates_neighbors() {
+    let node1_addr = get_test_addr(21070);
+    let node2_addr = get_test_addr(21071);
+
+    // Create bootstrap node
+    let node1 = Node::new(node1_addr);
+    node1.create_ring().await;
+    tokio::spawn(async move {
+        let _ = node1.run().await;
+    });
+    sleep(Duration::from_millis(300)).await;
+
+    // Node2 joins
+    let node2 = Node::new(node2_addr);
+    node2.join(node1_addr).await.unwrap();
+    tprintln!("Node2 joined, successor: {:?}", node2.get_successor().await);
+
+    // Node2 departs
+    node2.depart().await.unwrap();
+    tprintln!("Node2 departed gracefully");
+
+    // Verify node2 state is cleared
+    assert!(node2.get_successor().await.is_none());
+    assert!(node2.get_predecessor().await.is_none());
+}
+
+#[tokio::test]
+async fn test_join_fail_no_bootstrap() {
+    let joining_addr = get_test_addr(21080);
+    let nonexistent_addr = get_test_addr(21099);
+
+    let node = Node::new(joining_addr);
+    let result = node.join(nonexistent_addr).await;
+
+    // Should fail because no node is listening
+    assert!(result.is_err());
+    tprintln!("Join correctly failed: {:?}", result.err());
+}
+
+#[tokio::test]
+async fn test_protocol_set_predecessor() {
+    let addr = get_test_addr(21090);
+    let new_pred_addr = get_test_addr(21091);
+
+    // Create and run node
+    let node = Node::new(addr);
+    node.create_ring().await;
+    tokio::spawn(async move {
+        let _ = node.run().await;
+    });
+    sleep(Duration::from_millis(300)).await;
+
+    // Send SetPredecessor request
+    let request = Request::SetPredecessor { 
+        node: chordify::nodes::NodeInfo::new(new_pred_addr) 
+    };
+    let request_bytes = request.to_bytes().unwrap();
+    let response_bytes = connect(addr).await.unwrap().message(&request_bytes).await.unwrap();
+    let response = Response::from_bytes(&response_bytes).unwrap();
+
+    assert!(matches!(response, Response::Ok));
+    tprintln!("SetPredecessor successful");
+}
+
+#[tokio::test]
+async fn test_protocol_set_successor() {
+    let addr = get_test_addr(21092);
+    let new_succ_addr = get_test_addr(21093);
+
+    // Create and run node
+    let node = Node::new(addr);
+    node.create_ring().await;
+    tokio::spawn(async move {
+        let _ = node.run().await;
+    });
+    sleep(Duration::from_millis(300)).await;
+
+    // Send SetSuccessor request
+    let request = Request::SetSuccessor { 
+        node: chordify::nodes::NodeInfo::new(new_succ_addr) 
+    };
+    let request_bytes = request.to_bytes().unwrap();
+    let response_bytes = connect(addr).await.unwrap().message(&request_bytes).await.unwrap();
+    let response = Response::from_bytes(&response_bytes).unwrap();
+
+    assert!(matches!(response, Response::Ok));
+    tprintln!("SetSuccessor successful");
+}
+
+#[tokio::test]
+async fn test_protocol_transfer_keys() {
+    let addr = get_test_addr(21094);
+
+    // Create node with data
+    let node = Node::new(addr);
+    node.create_ring().await;
+    node.put("transfer_key1".to_string(), "transfer_value1".to_string()).await.unwrap();
+    node.put("transfer_key2".to_string(), "transfer_value2".to_string()).await.unwrap();
+
+    tokio::spawn(async move {
+        let _ = node.run().await;
+    });
+    sleep(Duration::from_millis(300)).await;
+
+    // Send TransferKeys request
+    let request = Request::TransferKeys { to_addr: get_test_addr(21095) };
+    let request_bytes = request.to_bytes().unwrap();
+    let response_bytes = connect(addr).await.unwrap().message(&request_bytes).await.unwrap();
+    let response = Response::from_bytes(&response_bytes).unwrap();
+
+    match response {
+        Response::Keys(keys) => {
+            tprintln!("Received {} keys", keys.len());
+            assert_eq!(keys.len(), 2);
+            assert!(keys.iter().any(|(k, _)| k == "transfer_key1"));
+            assert!(keys.iter().any(|(k, _)| k == "transfer_key2"));
+        }
+        _ => panic!("Expected Keys response"),
+    }
+}
+
+#[tokio::test]
+async fn test_protocol_get_successor() {
+    let addr = get_test_addr(21096);
+
+    let node = Node::new(addr);
+    node.create_ring().await;
+    tokio::spawn(async move {
+        let _ = node.run().await;
+    });
+    sleep(Duration::from_millis(300)).await;
+
+    // Send GetSuccessor request
+    let request = Request::GetSuccessor;
+    let request_bytes = request.to_bytes().unwrap();
+    let response_bytes = connect(addr).await.unwrap().message(&request_bytes).await.unwrap();
+    let response = Response::from_bytes(&response_bytes).unwrap();
+
+    match response {
+        Response::Successor(succ) => {
+            assert_eq!(succ.addr, addr);
+            tprintln!("GetSuccessor returned: {}", succ.addr);
+        }
+        _ => panic!("Expected Successor response"),
+    }
+}

@@ -26,10 +26,18 @@ pub enum Request {
     FindSuccessor { addr: SocketAddr },
     /// Get this node's predecessor
     GetPredecessor,
+    /// Get this node's successor
+    GetSuccessor,
     /// Notify node that we might be its predecessor
     Notify { node: NodeInfo },
+    /// Set this node's predecessor directly
+    SetPredecessor { node: NodeInfo },
+    /// Set this node's successor directly
+    SetSuccessor { node: NodeInfo },
     /// Join the ring via this node
     Join { node: NodeInfo },
+    /// Request keys that belong to a joining node (keys <= addr)
+    TransferKeys { to_addr: SocketAddr },
     /// Store a key-value pair
     Put { key: String, value: String },
     /// Retrieve a value by key
@@ -47,10 +55,12 @@ pub enum Response {
     Successor(NodeInfo),
     /// The predecessor node (if any)
     Predecessor(Option<NodeInfo>),
-    /// Acknowledgment (for Notify, Join)
+    /// Acknowledgment (for Notify, Join, Set*)
     Ok,
     /// Value for a key (None if not found)
     Value(Option<String>),
+    /// Transferred keys (for TransferKeys)
+    Keys(Vec<(String, String)>),
     /// Error response
     Error(String),
 }
