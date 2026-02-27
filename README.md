@@ -25,9 +25,9 @@
 - [x] **Message Protocol:** JSON-based custom protocol με Request/Response enums και length-prefixed framing.
 
 ### Φάση 3: Διαχείριση Μελών (Membership Management)
-- [ ] **Bootstrap Node:** Υλοποίηση σταθερού κόμβου για την αρχική σύνδεση.
-- [ ] **Node Join:** Υλοποίηση `join(nodeID)`. Ενημέρωση δεικτών και μεταφορά κλειδιών στον νέο κόμβο.
-- [ ] **Graceful Departure:** Υλοποίηση `depart(nodeID)`. Ενημέρωση γειτόνων και ανακατανομή κλειδιών πριν την έξοδο.
+- [x] **Bootstrap Node:** Υλοποίηση σταθερού κόμβου για την αρχική σύνδεση.
+- [x] **Node Join:** Υλοποίηση `join(nodeID)`. Ενημέρωση δεικτών και μεταφορά κλειδιών στον νέο κόμβο.
+- [x] **Graceful Departure:** Υλοποίηση `depart(nodeID)`. Ενημέρωση γειτόνων και ανακατανομή κλειδιών πριν την έξοδο.
 
 ### Φάση 4: Λειτουργίες DHT & Routing (Basic Chord)
 - [ ] **Routing Logic:** Κάθε κόμβος κρατάει pointers για `successor` και `predecessor`.
