@@ -537,7 +537,7 @@ async fn test_three_node_ring_join() {
     node2.join(node1_addr).await.unwrap();
     tprintln!("Node2 joined");
 
-    // Start node2
+    // Start node2 listening
     tokio::spawn(async move {
         let _ = node2.run().await;
     });
@@ -728,4 +728,362 @@ async fn test_peer_handle_connection_echo() {
         .await
         .unwrap();
     assert_eq!(response, msg);
+}
+
+// ==================== BootstrapNode Tests ====================
+
+use chordify::BootstrapNode;
+
+#[tokio::test]
+async fn test_bootstrap_node_create_ring() {
+    let addr = get_test_addr(23000);
+    let bootstrap = BootstrapNode::new(addr);
+    bootstrap.create_ring().await;
+
+    // Verify bootstrap is its own successor and predecessor
+    let successor = bootstrap.get_successor().await.unwrap();
+    let predecessor = bootstrap.get_predecessor().await.unwrap();
+    assert_eq!(successor.addr, addr);
+    assert_eq!(predecessor.addr, addr);
+    tprintln!("Bootstrap ring created at {}", addr);
+}
+
+#[tokio::test]
+async fn test_bootstrap_node_cannot_depart() {
+    let addr = get_test_addr(23010);
+    let bootstrap = BootstrapNode::new(addr);
+    bootstrap.create_ring().await;
+
+    // Bootstrap should refuse to depart
+    let result = bootstrap.depart().await;
+    assert!(result.is_err());
+    tprintln!("Bootstrap correctly refused to depart: {:?}", result.err());
+}
+
+#[tokio::test]
+async fn test_bootstrap_node_register_unregister() {
+    let addr = get_test_addr(23020);
+    let bootstrap = BootstrapNode::new(addr);
+    bootstrap.create_ring().await;
+
+    // Register a node
+    let node_info = chordify::NodeInfo::new(get_test_addr(23021));
+    bootstrap.register_node(node_info.clone()).await;
+
+    let members = bootstrap.get_ring_members().await;
+    assert!(members.iter().any(|n| n.addr == node_info.addr));
+    tprintln!("Registered node, members: {:?}", members);
+
+    // Unregister the node
+    bootstrap.unregister_node(node_info.addr).await;
+    let members = bootstrap.get_ring_members().await;
+    assert!(!members.iter().any(|n| n.addr == node_info.addr));
+    tprintln!("Unregistered node, members: {:?}", members);
+}
+
+#[tokio::test]
+async fn test_bootstrap_node_handle_join() {
+    let bootstrap_addr = get_test_addr(23030);
+    let bootstrap = BootstrapNode::new(bootstrap_addr);
+    bootstrap.create_ring().await;
+
+    // Start bootstrap listening
+    tokio::spawn(async move {
+        let _ = bootstrap.run().await;
+    });
+    sleep(Duration::from_millis(300)).await;
+
+    // New node joins via bootstrap
+    let joining_addr = get_test_addr(23031);
+    let joining_node = Node::new(joining_addr).with_bootstrap(bootstrap_addr);
+    let result = joining_node.join(bootstrap_addr).await;
+    assert!(result.is_ok());
+    tprintln!("Node joined via bootstrap successfully");
+
+    // Verify joining node has successor
+    let successor = joining_node.get_successor().await;
+    assert!(successor.is_some());
+    tprintln!("Joining node successor: {:?}", successor);
+}
+
+#[tokio::test]
+async fn test_bootstrap_node_put_get() {
+    let addr = get_test_addr(23040);
+    let bootstrap = BootstrapNode::new(addr);
+    bootstrap.create_ring().await;
+
+    // Put a value
+    bootstrap.put("bootstrap_key".to_string(), "bootstrap_value".to_string()).await.unwrap();
+
+    // Get the value
+    let value = bootstrap.get("bootstrap_key").await.unwrap();
+    assert_eq!(value, Some("bootstrap_value".to_string()));
+    tprintln!("Bootstrap put/get works");
+}
+
+#[tokio::test]
+async fn test_bootstrap_node_find_successor() {
+    let addr = get_test_addr(23050);
+    let bootstrap = BootstrapNode::new(addr);
+    bootstrap.create_ring().await;
+
+    // Find successor (should be self when alone)
+    let successor = bootstrap.find_successor(addr).await.unwrap();
+    assert_eq!(successor.addr, addr);
+    tprintln!("Bootstrap find_successor returns self when alone");
+}
+
+#[tokio::test]
+async fn test_bootstrap_node_ring_with_multiple_joins() {
+    let bootstrap_addr = get_test_addr(23060);
+    let bootstrap = BootstrapNode::new(bootstrap_addr);
+    bootstrap.create_ring().await;
+
+    // Start bootstrap listening
+    tokio::spawn(async move {
+        let _ = bootstrap.run().await;
+    });
+    sleep(Duration::from_millis(300)).await;
+
+    // Node 1 joins
+    let node1_addr = get_test_addr(23061);
+    let node1 = Node::new(node1_addr);
+    node1.join(bootstrap_addr).await.unwrap();
+    tprintln!("Node 1 joined");
+
+    // Start node1 listening
+    tokio::spawn(async move {
+        let _ = node1.run().await;
+    });
+    sleep(Duration::from_millis(300)).await;
+
+    // Node 2 joins
+    let node2_addr = get_test_addr(23062);
+    let node2 = Node::new(node2_addr);
+    node2.join(bootstrap_addr).await.unwrap();
+    tprintln!("Node 2 joined");
+
+    // Verify node2 has a successor
+    let node2_succ = node2.get_successor().await;
+    assert!(node2_succ.is_some());
+    tprintln!("Node 2 successor: {:?}", node2_succ);
+}
+
+#[tokio::test]
+async fn test_bootstrap_node_handles_ping() {
+    let addr = get_test_addr(23070);
+    let bootstrap = BootstrapNode::new(addr);
+    bootstrap.create_ring().await;
+
+    tokio::spawn(async move {
+        let _ = bootstrap.run().await;
+    });
+    sleep(Duration::from_millis(300)).await;
+
+    // Send Ping to bootstrap
+    let request = Request::Ping;
+    let request_bytes = request.to_bytes().unwrap();
+    let response_bytes = connect(addr).await.unwrap().message(&request_bytes).await.unwrap();
+    let response = Response::from_bytes(&response_bytes).unwrap();
+
+    assert!(matches!(response, Response::Pong));
+    tprintln!("Bootstrap responds to Ping");
+}
+
+#[tokio::test]
+async fn test_bootstrap_node_handles_get_predecessor() {
+    let addr = get_test_addr(23080);
+    let bootstrap = BootstrapNode::new(addr);
+    bootstrap.create_ring().await;
+
+    tokio::spawn(async move {
+        let _ = bootstrap.run().await;
+    });
+    sleep(Duration::from_millis(300)).await;
+
+    // Send GetPredecessor to bootstrap
+    let request = Request::GetPredecessor;
+    let request_bytes = request.to_bytes().unwrap();
+    let response_bytes = connect(addr).await.unwrap().message(&request_bytes).await.unwrap();
+    let response = Response::from_bytes(&response_bytes).unwrap();
+
+    match response {
+        Response::Predecessor(Some(pred)) => {
+            assert_eq!(pred.addr, addr);
+            tprintln!("Bootstrap predecessor is itself: {}", pred.addr);
+        }
+        _ => panic!("Expected Predecessor response"),
+    }
+}
+
+#[tokio::test]
+async fn test_bootstrap_node_handles_get_successor() {
+    let addr = get_test_addr(23090);
+    let bootstrap = BootstrapNode::new(addr);
+    bootstrap.create_ring().await;
+
+    tokio::spawn(async move {
+        let _ = bootstrap.run().await;
+    });
+    sleep(Duration::from_millis(300)).await;
+
+    // Send GetSuccessor to bootstrap
+    let request = Request::GetSuccessor;
+    let request_bytes = request.to_bytes().unwrap();
+    let response_bytes = connect(addr).await.unwrap().message(&request_bytes).await.unwrap();
+    let response = Response::from_bytes(&response_bytes).unwrap();
+
+    match response {
+        Response::Successor(succ) => {
+            assert_eq!(succ.addr, addr);
+            tprintln!("Bootstrap successor is itself: {}", succ.addr);
+        }
+        _ => panic!("Expected Successor response"),
+    }
+}
+
+#[tokio::test]
+async fn test_bootstrap_node_handles_set_predecessor() {
+    let addr = get_test_addr(23100);
+    let bootstrap = BootstrapNode::new(addr);
+    bootstrap.create_ring().await;
+
+    tokio::spawn(async move {
+        let _ = bootstrap.run().await;
+    });
+    sleep(Duration::from_millis(300)).await;
+
+    // Send SetPredecessor to bootstrap
+    let new_pred = chordify::NodeInfo::new(get_test_addr(23101));
+    let request = Request::SetPredecessor { node: new_pred.clone() };
+    let request_bytes = request.to_bytes().unwrap();
+    let response_bytes = connect(addr).await.unwrap().message(&request_bytes).await.unwrap();
+    let response = Response::from_bytes(&response_bytes).unwrap();
+
+    assert!(matches!(response, Response::Ok));
+    tprintln!("Bootstrap SetPredecessor accepted");
+}
+
+#[tokio::test]
+async fn test_bootstrap_node_handles_set_successor() {
+    let addr = get_test_addr(23110);
+    let bootstrap = BootstrapNode::new(addr);
+    bootstrap.create_ring().await;
+
+    tokio::spawn(async move {
+        let _ = bootstrap.run().await;
+    });
+    sleep(Duration::from_millis(300)).await;
+
+    // Send SetSuccessor to bootstrap
+    let new_succ = chordify::NodeInfo::new(get_test_addr(23111));
+    let request = Request::SetSuccessor { node: new_succ.clone() };
+    let request_bytes = request.to_bytes().unwrap();
+    let response_bytes = connect(addr).await.unwrap().message(&request_bytes).await.unwrap();
+    let response = Response::from_bytes(&response_bytes).unwrap();
+
+    assert!(matches!(response, Response::Ok));
+    tprintln!("Bootstrap SetSuccessor accepted");
+}
+
+#[tokio::test]
+async fn test_bootstrap_node_handles_transfer_keys() {
+    let addr = get_test_addr(23120);
+    let bootstrap = BootstrapNode::new(addr);
+    bootstrap.create_ring().await;
+    bootstrap.put("key1".to_string(), "value1".to_string()).await.unwrap();
+    bootstrap.put("key2".to_string(), "value2".to_string()).await.unwrap();
+
+    tokio::spawn(async move {
+        let _ = bootstrap.run().await;
+    });
+    sleep(Duration::from_millis(300)).await;
+
+    // Send TransferKeys to bootstrap
+    let request = Request::TransferKeys { to_addr: get_test_addr(23121) };
+    let request_bytes = request.to_bytes().unwrap();
+    let response_bytes = connect(addr).await.unwrap().message(&request_bytes).await.unwrap();
+    let response = Response::from_bytes(&response_bytes).unwrap();
+
+    match response {
+        Response::Keys(keys) => {
+            assert_eq!(keys.len(), 2);
+            tprintln!("Bootstrap transferred {} keys", keys.len());
+        }
+        _ => panic!("Expected Keys response"),
+    }
+}
+
+#[tokio::test]
+async fn test_bootstrap_node_handles_join_request() {
+    let addr = get_test_addr(23130);
+    let bootstrap = BootstrapNode::new(addr);
+    bootstrap.create_ring().await;
+
+    tokio::spawn(async move {
+        let _ = bootstrap.run().await;
+    });
+    sleep(Duration::from_millis(300)).await;
+
+    // Send Join request to bootstrap
+    let joining_node_info = chordify::NodeInfo::new(get_test_addr(23131));
+    let request = Request::Join { node: joining_node_info.clone() };
+    let request_bytes = request.to_bytes().unwrap();
+    let response_bytes = connect(addr).await.unwrap().message(&request_bytes).await.unwrap();
+    let response = Response::from_bytes(&response_bytes).unwrap();
+
+    match response {
+        Response::Successor(succ) => {
+            tprintln!("Bootstrap returned successor {} for join", succ.addr);
+        }
+        _ => panic!("Expected Successor response"),
+    }
+}
+
+#[tokio::test]
+async fn test_bootstrap_inner_node_access() {
+    let addr = get_test_addr(23140);
+    let bootstrap = BootstrapNode::new(addr);
+    bootstrap.create_ring().await;
+
+    // Access inner node
+    let inner = bootstrap.inner();
+    assert_eq!(inner.addr(), addr);
+    tprintln!("Bootstrap inner node accessible");
+}
+
+#[tokio::test]
+async fn test_bootstrap_get_ring_members_after_multiple_registers() {
+    let addr = get_test_addr(23150);
+    let bootstrap = BootstrapNode::new(addr);
+    bootstrap.create_ring().await;
+
+    // Register multiple nodes
+    for i in 0..5 {
+        let node_info = chordify::NodeInfo::new(get_test_addr(23151 + i));
+        bootstrap.register_node(node_info).await;
+    }
+
+    let members = bootstrap.get_ring_members().await;
+    // Bootstrap + 5 registered nodes = 6 (but bootstrap registers itself on create_ring)
+    assert!(members.len() >= 5);
+    tprintln!("Ring has {} members", members.len());
+}
+
+#[tokio::test]
+async fn test_bootstrap_duplicate_register_ignored() {
+    let addr = get_test_addr(23160);
+    let bootstrap = BootstrapNode::new(addr);
+    bootstrap.create_ring().await;
+
+    let node_info = chordify::NodeInfo::new(get_test_addr(23161));
+    
+    // Register same node twice
+    bootstrap.register_node(node_info.clone()).await;
+    bootstrap.register_node(node_info.clone()).await;
+
+    let members = bootstrap.get_ring_members().await;
+    let count = members.iter().filter(|n| n.addr == node_info.addr).count();
+    assert_eq!(count, 1);
+    tprintln!("Duplicate registration ignored");
 }

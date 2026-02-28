@@ -16,19 +16,19 @@ pub struct Node {
     /// This node's info (address only)
     info: NodeInfo,
     /// Shared mutable state
-    state: Arc<RwLock<NodeState>>,
+    pub(crate) state: Arc<RwLock<NodeState>>,
     /// Bootstrap node address (optional)
     bootstrap_addr: Option<SocketAddr>,
 }
 
 /// Mutable state for a node
-struct NodeState {
+pub(crate) struct NodeState {
     /// Our successor in the ring
-    successor: Option<NodeInfo>,
+    pub(crate) successor: Option<NodeInfo>,
     /// Our predecessor in the ring
-    predecessor: Option<NodeInfo>,
+    pub(crate) predecessor: Option<NodeInfo>,
     /// Local key-value storage
-    data: HashMap<String, String>,
+    pub(crate) data: HashMap<String, String>,
 }
 
 impl Node {
@@ -58,6 +58,11 @@ impl Node {
     /// Get this node's info
     pub fn info(&self) -> NodeInfo {
         self.info.clone()
+    }
+
+    /// Get a clone of the state Arc (for use by BootstrapNode)
+    pub(crate) fn state_clone(&self) -> Arc<RwLock<NodeState>> {
+        Arc::clone(&self.state)
     }
 
     /// Create the first node in a new ring (no existing nodes)
