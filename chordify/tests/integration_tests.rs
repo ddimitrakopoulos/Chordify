@@ -134,11 +134,11 @@ async fn test_concurrent_connections() {
 #[tokio::test]
 async fn test_node_create_ring() {
     let addr = get_test_addr(20000);
-    let node = Node::new(addr);
-    node.create_ring().await;
+    let bootstrap = BootstrapNode::new(addr);
+    bootstrap.create_ring().await;
 
-    let successor = node.get_successor().await.unwrap();
-    let predecessor = node.get_predecessor().await.unwrap();
+    let successor = bootstrap.inner().get_successor().await.unwrap();
+    let predecessor = bootstrap.inner().get_predecessor().await.unwrap();
     assert_eq!(successor.addr, addr);
     assert_eq!(predecessor.addr, addr);
 }
@@ -146,35 +146,35 @@ async fn test_node_create_ring() {
 #[tokio::test]
 async fn test_node_put_get_single_node() {
     let addr = get_test_addr(20010);
-    let node = Node::new(addr);
-    node.create_ring().await;
+    let bootstrap = BootstrapNode::new(addr);
+    bootstrap.create_ring().await;
 
-    node.put("foo".to_string(), "bar".to_string()).await.unwrap();
-    let value = node.get("foo").await.unwrap();
+    bootstrap.inner().put("foo".to_string(), "bar".to_string()).await.unwrap();
+    let value = bootstrap.inner().get("foo").await.unwrap();
     assert_eq!(value, Some("bar".to_string()));
 
-    let missing = node.get("missing").await.unwrap();
+    let missing = bootstrap.inner().get("missing").await.unwrap();
     assert_eq!(missing, None);
 }
 
 #[tokio::test]
 async fn test_node_find_successor_single_node() {
     let addr = get_test_addr(20020);
-    let node = Node::new(addr);
-    node.create_ring().await;
+    let bootstrap = BootstrapNode::new(addr);
+    bootstrap.create_ring().await;
 
-    let successor = node.find_successor(addr).await.unwrap();
+    let successor = bootstrap.inner().find_successor(addr).await.unwrap();
     assert_eq!(successor.addr, addr);
 }
 
 #[tokio::test]
 async fn test_node_run_and_ping() {
     let addr = get_test_addr(20030);
-    let node = Node::new(addr);
-    node.create_ring().await;
+    let bootstrap = BootstrapNode::new(addr);
+    bootstrap.create_ring().await;
 
     tokio::spawn(async move {
-        let _ = node.run().await;
+        let _ = bootstrap.inner().run().await;
     });
     sleep(Duration::from_millis(300)).await;
 
@@ -188,11 +188,11 @@ async fn test_node_run_and_ping() {
 #[tokio::test]
 async fn test_node_run_and_get_predecessor() {
     let addr = get_test_addr(20040);
-    let node = Node::new(addr);
-    node.create_ring().await;
+    let bootstrap = BootstrapNode::new(addr);
+    bootstrap.create_ring().await;
 
     tokio::spawn(async move {
-        let _ = node.run().await;
+        let _ = bootstrap.inner().run().await;
     });
     sleep(Duration::from_millis(300)).await;
 
@@ -558,10 +558,10 @@ async fn test_transfer_keys_to_protocol() {
     tokio::spawn({
         let addr = source_addr;
         async move {
-            let node = Node::new(addr);
-            node.create_ring().await;
-            node.put("key".to_string(), "value".to_string()).await.unwrap();
-            let _ = node.run().await;
+            let bootstrap = BootstrapNode::new(addr);
+            bootstrap.create_ring().await;
+            bootstrap.inner().put("key".to_string(), "value".to_string()).await.unwrap();
+            let _ = bootstrap.inner().run().await;
         }
     });
     sleep(Duration::from_millis(200)).await;
@@ -717,10 +717,10 @@ async fn test_protocol_set_predecessor() {
     let addr = get_test_addr(24140);
     let new_pred_addr = get_test_addr(24141);
 
-    let node = Node::new(addr);
-    node.create_ring().await;
+    let bootstrap = BootstrapNode::new(addr);
+    bootstrap.create_ring().await;
     tokio::spawn(async move {
-        let _ = node.run().await;
+        let _ = bootstrap.inner().run().await;
     });
     sleep(Duration::from_millis(300)).await;
 
@@ -739,10 +739,10 @@ async fn test_protocol_set_successor() {
     let addr = get_test_addr(24142);
     let new_succ_addr = get_test_addr(24143);
 
-    let node = Node::new(addr);
-    node.create_ring().await;
+    let bootstrap = BootstrapNode::new(addr);
+    bootstrap.create_ring().await;
     tokio::spawn(async move {
-        let _ = node.run().await;
+        let _ = bootstrap.inner().run().await;
     });
     sleep(Duration::from_millis(300)).await;
 
@@ -760,13 +760,13 @@ async fn test_protocol_set_successor() {
 async fn test_protocol_transfer_keys() {
     let addr = get_test_addr(24144);
 
-    let node = Node::new(addr);
-    node.create_ring().await;
-    node.put("key1".to_string(), "value1".to_string()).await.unwrap();
-    node.put("key2".to_string(), "value2".to_string()).await.unwrap();
+    let bootstrap = BootstrapNode::new(addr);
+    bootstrap.create_ring().await;
+    bootstrap.inner().put("key1".to_string(), "value1".to_string()).await.unwrap();
+    bootstrap.inner().put("key2".to_string(), "value2".to_string()).await.unwrap();
 
     tokio::spawn(async move {
-        let _ = node.run().await;
+        let _ = bootstrap.inner().run().await;
     });
     sleep(Duration::from_millis(300)).await;
 

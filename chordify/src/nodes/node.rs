@@ -1,6 +1,15 @@
 //! Node - A Chord DHT node implementation
 //!
-//! Uses the P2P communication layer for all network operations.
+//! Uses the P2P    /// Get a clone of the state Arc (for use by BootstrapNode)
+    pub(crate) fn state_clone(&self) -> Arc<RwLock<NodeState>> {
+        Arc::clone(&self.state)
+    }
+
+    /// Create the first node in a new ring (internal use only).
+    /// 
+    /// **Do not call this method directly.** Use `BootstrapNode::create_ring()` instead.
+    /// Only `BootstrapNode` should create rings - regular nodes must join via bootstrap.
+    pub(crate) async fn create_ring(&self) {ication layer for all network operations.
 //! All join/depart operations are coordinated by the bootstrap node.
 
 use std::collections::HashMap;
@@ -66,20 +75,12 @@ impl Node {
         Arc::clone(&self.state)
     }
 
-    /// Create the first node in a new ring (only for bootstrap node)
-    pub async fn create_ring(&self) {
-        // Enforce only one bootstrap node per ring (per address)
-        match connect(self.info.addr).await {
-            Ok(_) => {
-                panic!("Cannot create ring: another node is already listening at {}. Use join() instead.", self.info.addr);
-            }
-            Err(_) => {
-                let mut state = self.state.write().await;
-                state.successor = Some(self.info.clone());
-                state.predecessor = Some(self.info.clone());
-                info!("Created new ring, node is alone at {}", self.info.addr);
-            }
-        }
+    /// Create the first node in a new ring (internal - use BootstrapNode::create_ring())
+    pub(crate) async fn create_ring(&self) {
+        let mut state = self.state.write().await;
+        state.successor = Some(self.info.clone());
+        state.predecessor = Some(self.info.clone());
+        info!("Created new ring, node is alone at {}", self.info.addr);
     }
 
     /// Join an existing ring via bootstrap node
