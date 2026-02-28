@@ -701,3 +701,31 @@ async fn test_protocol_get_successor() {
         _ => panic!("Expected Successor response"),
     }
 }
+
+#[tokio::test]
+async fn test_peer_handle_connection_echo() {
+    use chordify::communication::{Peer, connect};
+    use std::net::SocketAddr;
+    use tokio::time::sleep;
+    use std::time::Duration;
+
+    let addr: SocketAddr = "127.0.0.1:22000".parse().unwrap();
+    let peer = Peer::bind(addr).await.unwrap();
+
+    // Echo handler: returns the same bytes
+    tokio::spawn(async move {
+        let _ = peer.listen(|request, _from| async move {
+            Ok(request)
+        }).await;
+    });
+    sleep(Duration::from_millis(200)).await;
+
+    let msg = b"test-handle-connection";
+    let response = connect(addr)
+        .await
+        .unwrap()
+        .message(msg)
+        .await
+        .unwrap();
+    assert_eq!(response, msg);
+}
