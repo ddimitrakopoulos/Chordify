@@ -62,10 +62,18 @@ impl Node {
 
     /// Create the first node in a new ring (no existing nodes)
     pub async fn create_ring(&self) {
-        let mut state = self.state.write().await;
-        state.successor = Some(self.info.clone());
-        state.predecessor = Some(self.info.clone());
-        info!("Created new ring, node is alone at {}", self.info.addr);
+        // Enforce only one bootstrap node per ring (per address)
+        match connect(self.info.addr).await {
+            Ok(_) => {
+                panic!("Cannot create ring: another node is already listening at {}. Use join() instead.", self.info.addr);
+            }
+            Err(_) => {
+                let mut state = self.state.write().await;
+                state.successor = Some(self.info.clone());
+                state.predecessor = Some(self.info.clone());
+                info!("Created new ring, node is alone at {}", self.info.addr);
+            }
+        }
     }
 
     /// Join an existing ring via a known node (or bootstrap node if set)
