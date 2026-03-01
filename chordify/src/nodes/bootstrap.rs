@@ -349,6 +349,16 @@ impl BootstrapNode {
         warn!("Bootstrap node cannot depart - it must always stay connected");
         Err(anyhow::anyhow!("Bootstrap node cannot depart"))
     }
+
+    /// BootstrapNode cannot join an existing ring (it always creates one)
+    pub async fn join(&self, _bootstrap_addr: SocketAddr) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!("BootstrapNode cannot join an existing ring. It must create a new ring."))
+    }
+
+    /// BootstrapNode cannot depart from the ring (it is always present)
+    pub async fn depart(&self, _bootstrap_addr: SocketAddr) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!("BootstrapNode cannot depart from the ring. It must always be present."))
+    }
 }
 
 /// Handle an incoming request (bootstrap-aware version)
