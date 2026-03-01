@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, debug, warn};
 
-use crate::communication::{Peer, connect};
+use crate::tcp::{Server, connect};
 use super::protocol::{Request, Response, NodeInfo};
 
 /// A Chord DHT node
@@ -133,10 +133,10 @@ impl Node {
 
     /// Start listening and handling requests
     pub async fn run(&self) -> anyhow::Result<()> {
-        let peer = Peer::bind(self.info.addr).await?;
+        let server = Server::bind(self.info.addr).await?;
         let state = Arc::clone(&self.state);
         let info = self.info.clone();
-        peer.listen(move |request_bytes, from| {
+        server.listen(move |request_bytes, from| {
             let state = Arc::clone(&state);
             let info = info.clone();
             async move {
@@ -320,8 +320,8 @@ async fn handle_request(
                 let request = Request::ReceiveKeys { keys: keys.clone() };
                 let request_bytes = request.to_bytes()?;
                 match connect(target_addr).await {
-                    Ok(peer) => {
-                        match peer.message(&request_bytes).await {
+                    Ok(client) => {
+                        match client.message(&request_bytes).await {
                             Ok(_) => info!("Transferred {} keys to {}", keys.len(), target_addr),
                             Err(e) => warn!("Failed to transfer keys to {}: {}", target_addr, e),
                         }

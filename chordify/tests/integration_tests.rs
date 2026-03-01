@@ -1,11 +1,6 @@
-//! Integration tests for Chordify P2P DHT
-//!
-//! Tests cover:
-//! - P2P communication (Peer, connect, message/response)
-//! - Node operations (create ring, put/get, find successor)
-//! - Bootstrap-coordinated join/depart operations
+//! Integration tests for P2P communication: Connect → Message → Response
 
-use chordify::communication::{Peer, connect, connect_with_timeout};
+use chordify::tcp::{Server, connect, connect_with_timeout};
 use chordify::nodes::{Node, Request, Response};
 use chordify::BootstrapNode;
 use std::net::SocketAddr;
@@ -26,14 +21,14 @@ fn get_test_addr(port: u16) -> SocketAddr {
     format!("127.0.0.1:{}", port).parse().unwrap()
 }
 
-// ==================== Peer Tests ====================
+// ==================== Server Tests ====================
 
 #[tokio::test]
 async fn test_peer_bind() {
     let addr = get_test_addr(19000);
-    let peer = Peer::bind(addr).await.unwrap();
-    tprintln!("Peer bound to {}", peer.addr());
-    assert_eq!(peer.addr(), addr);
+    let peer = Server::bind(addr).await.unwrap();
+    tprintln!("Server bound to {}", peer.get_addr());
+    assert_eq!(peer.get_addr(), addr);
 }
 
 // ==================== Connect → Message → Response Tests ====================
@@ -41,22 +36,72 @@ async fn test_peer_bind() {
 #[tokio::test]
 async fn test_connect_message_response() {
     let server_addr = get_test_addr(19010);
+    tprintln!("Starting echo peer at {}", server_addr);
     tokio::spawn(async move {
-        let peer = Peer::bind(server_addr).await.unwrap();
+        let peer = Server::bind(server_addr).await.unwrap();
         let _ = peer.listen(|request, _from| async move {
             Ok(request) // echo
         }).await;
     });
     sleep(Duration::from_millis(300)).await;
-    
     let msg = b"hello world";
+    tprintln!("Sending message to {}: {:?}", server_addr, msg);
     let response = connect(server_addr)
         .await
         .unwrap()
         .message(msg)
         .await
         .unwrap();
+    tprintln!("Received response: {:?}", response);
     assert_eq!(response, msg);
+}
+
+#[tokio::test]
+async fn test_connect_send_fire_and_forget() {
+    let server_addr = get_test_addr(19011);
+    tprintln!("Starting fire-and-forget peer at {}", server_addr);
+    tokio::spawn(async move {
+        let peer = Server::bind(server_addr).await.unwrap();
+        let _ = peer.listen(|request, _from| async move {
+            tprintln!("Server received: {:?}", request);
+            assert_eq!(request, b"fire-and-forget");
+            Ok(Vec::new())
+        }).await;
+    });
+    sleep(Duration::from_millis(300)).await;
+    tprintln!("Sending fire-and-forget message to {}", server_addr);
+    let _ = connect(server_addr)
+        .await
+        .unwrap()
+        .send(b"fire-and-forget")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_multiple_sequential_requests() {
+    let server_addr = get_test_addr(19020);
+    
+    tokio::spawn(async move {
+        let peer = Server::bind(server_addr).await.unwrap();
+        let _ = peer.listen(|request, _from| async move {
+            Ok(request) // echo
+        }).await;
+    });
+    
+    sleep(Duration::from_millis(300)).await;
+    
+    // Each message creates a new connection (stateless)
+    for i in 0..5 {
+        let msg = format!("Message {}", i);
+        let response = connect(server_addr)
+            .await
+            .unwrap()
+            .message(msg.as_bytes())
+            .await
+            .unwrap();
+        assert_eq!(response, msg.as_bytes());
+    }
 }
 
 #[tokio::test]
@@ -68,6 +113,7 @@ async fn test_connect_to_nonexistent_peer() {
 
 #[tokio::test]
 async fn test_connect_timeout() {
+    // Use an address that won't respond (non-routable)
     let addr: SocketAddr = "10.255.255.1:9999".parse().unwrap();
     let result = connect_with_timeout(addr, Duration::from_millis(100)).await;
     assert!(result.is_err());
@@ -78,14 +124,15 @@ async fn test_large_message() {
     let server_addr = get_test_addr(19030);
     
     tokio::spawn(async move {
-        let peer = Peer::bind(server_addr).await.unwrap();
+        let peer = Server::bind(server_addr).await.unwrap();
         let _ = peer.listen(|request, _from| async move {
             Ok(request) // echo
         }).await;
     });
+    
     sleep(Duration::from_millis(300)).await;
     
-    // 1 MB message
+    // Send a large message (1 MB)
     let msg = vec![42u8; 1024 * 1024];
     let response = connect(server_addr)
         .await
@@ -95,6 +142,7 @@ async fn test_large_message() {
         .unwrap();
     
     assert_eq!(response.len(), msg.len());
+    assert_eq!(response, msg);
 }
 
 #[tokio::test]
@@ -102,13 +150,15 @@ async fn test_concurrent_connections() {
     let server_addr = get_test_addr(19040);
     
     tokio::spawn(async move {
-        let peer = Peer::bind(server_addr).await.unwrap();
+        let peer = Server::bind(server_addr).await.unwrap();
         let _ = peer.listen(|request, _from| async move {
             Ok(request) // echo
         }).await;
     });
+    
     sleep(Duration::from_millis(300)).await;
     
+    // Spawn multiple concurrent connections
     let mut handles = vec![];
     for i in 0..10 {
         let handle = tokio::spawn(async move {
@@ -129,7 +179,61 @@ async fn test_concurrent_connections() {
     }
 }
 
-// ==================== Node Tests ====================
+#[tokio::test]
+async fn test_handler_receives_sender_address() {
+    let server_addr = get_test_addr(19050);
+    
+    tokio::spawn(async move {
+        let peer = Server::bind(server_addr).await.unwrap();
+        let _ = peer.listen(|_request, from| async move {
+            // Return the sender's port as response
+            Ok(from.port().to_string().into_bytes())
+        }).await;
+    });
+    
+    sleep(Duration::from_millis(300)).await;
+    
+    let response = connect(server_addr)
+        .await
+        .unwrap()
+        .message(b"test")
+        .await
+        .unwrap();
+    
+    // Response should be a valid port number
+    let port_str = String::from_utf8(response).unwrap();
+    let port: u16 = port_str.parse().unwrap();
+    assert!(port > 0);
+}
+
+#[tokio::test]
+async fn test_handler_can_process_request() {
+    let server_addr = get_test_addr(19060);
+    
+    tokio::spawn(async move {
+        let peer = Server::bind(server_addr).await.unwrap();
+        let _ = peer.listen(|request, _from| async move {
+            // Reverse the request bytes
+            let mut reversed = request;
+            reversed.reverse();
+            Ok(reversed)
+        }).await;
+    });
+    
+    sleep(Duration::from_millis(300)).await;
+    
+    let response = connect(server_addr)
+        .await
+        .unwrap()
+        .message(b"hello")
+        .await
+        .unwrap();
+    
+    assert_eq!(response, b"olleh");
+}
+
+// ==================== Node (Chord DHT) Tests ====================
+// NOTE: Node::create_ring() is now private. Use BootstrapNode for ring creation.
 
 #[tokio::test]
 async fn test_node_create_ring() {
@@ -137,8 +241,9 @@ async fn test_node_create_ring() {
     let bootstrap = BootstrapNode::new(addr);
     bootstrap.create_ring().await;
 
-    let successor = bootstrap.inner().get_successor().await.unwrap();
-    let predecessor = bootstrap.inner().get_predecessor().await.unwrap();
+    // After creating a ring, successor and predecessor should be self
+    let successor = bootstrap.get_successor().await.unwrap();
+    let predecessor = bootstrap.get_predecessor().await.unwrap();
     assert_eq!(successor.addr, addr);
     assert_eq!(predecessor.addr, addr);
 }
@@ -149,11 +254,13 @@ async fn test_node_put_get_single_node() {
     let bootstrap = BootstrapNode::new(addr);
     bootstrap.create_ring().await;
 
-    bootstrap.inner().put("foo".to_string(), "bar".to_string()).await.unwrap();
-    let value = bootstrap.inner().get("foo").await.unwrap();
+    // Put and get a value
+    bootstrap.put("foo".to_string(), "bar".to_string()).await.unwrap();
+    let value = bootstrap.get("foo").await.unwrap();
     assert_eq!(value, Some("bar".to_string()));
 
-    let missing = bootstrap.inner().get("missing").await.unwrap();
+    // Get a non-existent key
+    let missing = bootstrap.get("missing").await.unwrap();
     assert_eq!(missing, None);
 }
 
@@ -163,7 +270,7 @@ async fn test_node_find_successor_single_node() {
     let bootstrap = BootstrapNode::new(addr);
     bootstrap.create_ring().await;
 
-    let successor = bootstrap.inner().find_successor(addr).await.unwrap();
+    let successor = bootstrap.find_successor(addr).await.unwrap();
     assert_eq!(successor.addr, addr);
 }
 
@@ -173,11 +280,14 @@ async fn test_node_run_and_ping() {
     let bootstrap = BootstrapNode::new(addr);
     bootstrap.create_ring().await;
 
+    // Start node in background
     tokio::spawn(async move {
-        let _ = bootstrap.inner().run().await;
+        let _ = bootstrap.run().await;
     });
+
     sleep(Duration::from_millis(300)).await;
 
+    // Send a Ping request directly
     let request = Request::Ping;
     let request_bytes = request.to_bytes().unwrap();
     let response_bytes = connect(addr).await.unwrap().message(&request_bytes).await.unwrap();
@@ -192,19 +302,63 @@ async fn test_node_run_and_get_predecessor() {
     bootstrap.create_ring().await;
 
     tokio::spawn(async move {
-        let _ = bootstrap.inner().run().await;
+        let _ = bootstrap.run().await;
     });
+
     sleep(Duration::from_millis(300)).await;
 
     let request = Request::GetPredecessor;
     let request_bytes = request.to_bytes().unwrap();
     let response_bytes = connect(addr).await.unwrap().message(&request_bytes).await.unwrap();
     let response = Response::from_bytes(&response_bytes).unwrap();
-    
     match response {
         Response::Predecessor(Some(pred)) => assert_eq!(pred.addr, addr),
         _ => panic!("Expected Predecessor response"),
     }
+}
+
+#[tokio::test]
+async fn test_nodes_specific_ports_and_responses() {
+    let ports = [20100, 20101, 20102];
+    let addrs: Vec<_> = ports.iter().map(|p| get_test_addr(*p)).collect();
+    let mut handles = vec![];
+    for addr in &addrs {
+        let addr = *addr;
+        tprintln!("Starting peer at {}", addr);
+        handles.push(tokio::spawn(async move {
+            let peer = Server::bind(addr).await.unwrap();
+            let _ = peer.listen(move |request, _from| async move {
+                tprintln!("Server {} received: {:?}", addr, request);
+                let mut response = request.clone();
+                response.extend_from_slice(b" received");
+                tprintln!("Server {} responding: {:?}", addr, response);
+                Ok(response)
+            }).await;
+        }));
+    }
+    sleep(Duration::from_millis(300)).await;
+    for addr in &addrs {
+        let msg = format!("hello from {}", addr.port());
+        tprintln!("Sending to {}: {}", addr, msg);
+        let response = connect(*addr)
+            .await
+            .unwrap()
+            .message(msg.as_bytes())
+            .await
+            .unwrap();
+        tprintln!("Received from {}: {:?}", addr, response);
+        let expected = [msg.as_bytes(), b" received"].concat();
+        assert_eq!(response, expected);
+    }
+    let unused_addr = get_test_addr(20199);
+    tprintln!("Sending to unused port {}", unused_addr);
+    let result = connect(unused_addr).await;
+    if result.is_err() {
+        tprintln!("No peer listening at {} (expected)", unused_addr);
+    } else {
+        tprintln!("Unexpectedly connected to {}", unused_addr);
+    }
+    assert!(result.is_err());
 }
 
 // ==================== BootstrapNode Tests ====================

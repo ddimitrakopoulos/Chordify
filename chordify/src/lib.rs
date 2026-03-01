@@ -7,9 +7,9 @@
 //! - `communication`: Low-level P2P messaging (connect, message, response)
 //! - `nodes`: Chord DHT nodes (NodeId, Node, Request/Response protocol)
 
-pub mod communication;
+pub mod tcp;
 pub mod nodes;
 
 // Re-export commonly used types
-pub use communication::{Peer, Connection, connect, connect_with_timeout};
+pub use tcp::{Server, Client, connect, connect_with_timeout};
 pub use nodes::{BootstrapNode, Node, NodeInfo, Request, Response};

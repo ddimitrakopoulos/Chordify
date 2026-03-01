@@ -27,7 +27,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, debug, warn};
 
-use crate::communication::{Peer, connect};
+use crate::tcp::{Server, connect};
 use super::protocol::{Request, Response, NodeInfo};
 use super::node::{Node, NodeState};
 
@@ -327,14 +327,14 @@ impl BootstrapNode {
 
     /// Start listening and handling requests (bootstrap-aware)
     pub async fn run(&self) -> anyhow::Result<()> {
-        let peer = Peer::bind(self.addr()).await?;
+        let server = Server::bind(self.addr()).await?;
         let node_state = self.node.state_clone();
         let node_info = self.node.info();
         let ring_members = Arc::clone(&self.ring_members);
 
         info!("Bootstrap node listening on {}", self.addr());
 
-        peer.listen(move |request_bytes, from| {
+        server.listen(move |request_bytes, from| {
             let state = Arc::clone(&node_state);
             let info = node_info.clone();
             let members = Arc::clone(&ring_members);
