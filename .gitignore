@@ -1,0 +1,68 @@
+# Assignment PDF
+assignment.pdf
+
+# Rust build artifacts
+/target/
+**/target/
+debug/
+*.pdb
+
+# Cargo.lock should be committed for binaries (reproducible builds)
+# Only ignore for libraries
+# Cargo.lock
+
+# IDE and Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Rust specific
+**/*.rs.bk
+*.rlib
+
+# Coverage
+*.gcno
+*.gcda
+tarpaulin-report.html
+coverage/
+
+# Profiling
+perf.data
+perf.data.old
+flamegraph.svg
+cachegrind.out.*
+
+# Documentation build
+/doc/
+
+# Backup files
+*.bak
+*.orig
+
+# Environment
+.env
+.env.local
+*.env
+
+# Logs
+*.log
+logs/
+
+# Test files
+test.txt
