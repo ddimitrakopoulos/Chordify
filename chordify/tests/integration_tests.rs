@@ -249,18 +249,18 @@ async fn test_node_create_ring() {
 }
 
 #[tokio::test]
-async fn test_node_put_get_single_node() {
+async fn test_node_insert_query_single_node() {
     let addr = get_test_addr(20010);
     let bootstrap = BootstrapNode::new(addr);
     bootstrap.create_ring().await;
 
-    // Put and get a value
-    bootstrap.put("foo".to_string(), "bar".to_string()).await.unwrap();
-    let value = bootstrap.get("foo").await.unwrap();
+    // Insert and query a value
+    bootstrap.insert("foo".to_string(), "bar".to_string()).await.unwrap();
+    let value = bootstrap.query("foo".to_string()).await.unwrap();
     assert_eq!(value, Some("bar".to_string()));
 
-    // Get a non-existent key
-    let missing = bootstrap.get("missing").await.unwrap();
+    // Query a non-existent key
+    let missing = bootstrap.query("missing".to_string()).await.unwrap();
     assert_eq!(missing, None);
 }
 
@@ -410,8 +410,8 @@ async fn test_bootstrap_node_put_get() {
     let bootstrap = BootstrapNode::new(addr);
     bootstrap.create_ring().await;
 
-    bootstrap.put("key".to_string(), "value".to_string()).await.unwrap();
-    let value = bootstrap.get("key").await.unwrap();
+    bootstrap.insert("key".to_string(), "value".to_string()).await.unwrap();
+    let value = bootstrap.query("key".to_string()).await.unwrap();
     assert_eq!(value, Some("value".to_string()));
 }
 
@@ -714,8 +714,8 @@ async fn test_transfer_keys_to_protocol() {
         async move {
             let bootstrap = BootstrapNode::new(addr);
             bootstrap.create_ring().await;
-            bootstrap.inner().put("key".to_string(), "value".to_string()).await.unwrap();
-            let _ = bootstrap.inner().run().await;
+            bootstrap.insert("key".to_string(), "value".to_string()).await.unwrap();
+            let _ = bootstrap.run().await;
         }
     });
     sleep(Duration::from_millis(200)).await;
@@ -916,11 +916,11 @@ async fn test_protocol_transfer_keys() {
 
     let bootstrap = BootstrapNode::new(addr);
     bootstrap.create_ring().await;
-    bootstrap.inner().put("key1".to_string(), "value1".to_string()).await.unwrap();
-    bootstrap.inner().put("key2".to_string(), "value2".to_string()).await.unwrap();
+    bootstrap.insert("key1".to_string(), "value1".to_string()).await.unwrap();
+    bootstrap.insert("key2".to_string(), "value2".to_string()).await.unwrap();
 
     tokio::spawn(async move {
-        let _ = bootstrap.inner().run().await;
+        let _ = bootstrap.run().await;
     });
     sleep(Duration::from_millis(300)).await;
 

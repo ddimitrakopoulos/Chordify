@@ -33,6 +33,7 @@ impl Clone for Node {
         Self {
             info: self.info.clone(),
             state: Arc::clone(&self.state),
+            bootstrap_addr: self.bootstrap_addr,
         }
     }
 }
@@ -517,13 +518,6 @@ impl Node {
                     Err(e) => Response::Error(e.to_string()),
                 }
             }
-            _ => Response::Error("Unsupported request type".to_string()),
-            // Request::Delete { key } => {
-            //     let mut state_guard = state.write().await;
-            //     state_guard.data.remove(&key);
-            //     debug!("Deleted key '{}'", key);
-            //     Response::Ok
-            // }
         };
         response.to_bytes()
 

@@ -31,6 +31,9 @@ use crate::tcp::{Server, connect};
 use super::protocol::{Request, Response, NodeInfo};
 use super::node::{Node, NodeState};
 
+use sha1::{Sha1, Digest};
+const N: u64 = 10; // Number of bits in the identifier space (SHA-1 hash size)
+
 /// A Bootstrap node for the Chord DHT ring.
 /// 
 /// The bootstrap node:
@@ -95,15 +98,150 @@ impl BootstrapNode {
         self.node.find_successor(addr).await
     }
 
-    /// Store a key-value pair
-    pub async fn put(&self, key: String, value: String) -> anyhow::Result<()> {
-        self.node.put(key, value).await
+    /// Send a request and ignore the response; propagate errors if desired.
+    async fn send_request_no_response(&self, addr: SocketAddr, request: Request) -> anyhow::Result<()> {
+        let request_bytes = request.to_bytes()?;
+        connect(addr).await?.send(&request_bytes).await?;
+        Ok(())
     }
 
-    /// Get a value by key
-    pub async fn get(&self, key: &str) -> anyhow::Result<Option<String>> {
-        self.node.get(key).await
+    // Auxiliary functions for hashing and key responsibility
+    fn hash_value(val: &str) -> u64 {
+        let mut hasher = Sha1::new();
+        hasher.update(val.as_bytes());
+        let hash = hasher.finalize();
+
+        // Calculate the hash value modulo 2^N
+        let hash_value = u64::from_be_bytes(hash[0..8].try_into().unwrap());
+        hash_value % (1 << N) // Assuming an N-bit identifier space
     }
+
+    async fn belongs_to_current (&self, key_hash: u64, node_hash: u64) -> bool {
+        let prev = self.inner().state.read().await.predecessor.clone();
+        if prev.is_none() {
+            // No predecessor set, assume we're responsible for all keys
+            return true;
+        }
+        let prev_hash = Self::hash_value(&prev.unwrap().addr.to_string());
+
+        // If we're alone in the ring (predecessor is self), we're responsible for all keys
+        if prev_hash == node_hash {
+            return true;
+        }
+
+        (prev_hash < node_hash && key_hash > prev_hash && key_hash <= node_hash) ||
+        (prev_hash > node_hash && (key_hash > prev_hash || key_hash <= node_hash))
+    }
+
+
+    /// Insert a key-value pair
+    pub async fn insert(&self, key: String, value: String) -> anyhow::Result<()> {
+        // Hash the key to find its identifier
+        let key_hash = Self::hash_value(&key);
+        let node_hash = Self::hash_value(&self.info().addr.to_string());
+
+        debug!("Inserting key '{}' with hash {} (node hash {})", key, key_hash, node_hash);
+
+        // If responsible node for the key is this node, store it locally
+        // FIX ME: CHECK BEHAVIOUR ON SAME KEY INSERTS
+        if self.belongs_to_current(key_hash, node_hash).await {
+            let mut state = self.node.state.write().await;
+            state.data.insert(key.clone(), value);
+            debug!("Stored key '{}' locally", key);
+            Ok(())
+        }
+        // Otherwise, forward to the appropriate node (successor or predecessor)
+        else {
+            let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
+            else {key_hash - node_hash };
+            let request = Request::Insert { key, value };
+
+            // Forward to successor if it's closer, otherwise forward to predecessor
+            if (forward_dist < (1 << (N - 1))) && self.node.state.read().await.successor.is_some() {
+                let successor = self.node.state.read().await.successor.clone().unwrap();
+                self.send_request_no_response(successor.addr, request).await?;
+            } else {
+                let predecessor = self.node.state.read().await.predecessor.clone().unwrap();
+                self.send_request_no_response(predecessor.addr, request).await?;
+            }
+            Ok(())
+        }
+    }
+
+
+    /// Query function to retrieve a value by key
+    /// Returns Some(value) if the key is found locally, None if forwarded or not found
+    pub async fn query(&self, key: String) -> anyhow::Result<Option<String>> {
+        // Hash the key to find its identifier
+        let key_hash = Self::hash_value(&key);
+        let node_hash = Self::hash_value(&self.info().addr.to_string());
+
+        if key != "*" {
+            // If responsible node for the key is this node, retrieve it locally
+            if self.belongs_to_current(key_hash, node_hash).await {
+                let state = self.node.state.read().await;
+                let value = state.data.get(&key).cloned();
+                Ok(value)
+            }
+            // Otherwise, forward to the appropriate node (successor or predecessor)
+            else {
+                let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
+                else {key_hash - node_hash };
+                let request = Request::Query { key, source: self.info().addr };
+
+                // Forward to successor if it's closer, otherwise forward to predecessor
+                if (forward_dist < (1 << (N - 1))) && self.node.state.read().await.successor.is_some() {
+                    let successor = self.node.state.read().await.successor.clone().unwrap();
+                    self.send_request_no_response(successor.addr, request).await?;
+                } else {
+                    let predecessor = self.node.state.read().await.predecessor.clone().unwrap();
+                    self.send_request_no_response(predecessor.addr, request).await?;
+                }
+                // Query was forwarded, no local result
+                Ok(None)
+            }
+        }
+        else {
+            // Handle wildcard query: retrieve all key-value pairs from this node and forward to successor/predecessor
+            Ok(None)
+        }
+    }
+
+
+    /// Delete a key-value pair
+    pub async fn delete(&self, key: String) -> anyhow::Result<()> {
+        // Hash the key to find its identifier
+        let key_hash = Self::hash_value(&key);
+        let node_hash = Self::hash_value(&self.info().addr.to_string());
+
+        debug!("Deleting key '{}' with hash {} (node hash {})", key, key_hash, node_hash);
+
+        // If responsible node for the key is this node, store it locally
+        // FIX ME: CHECK BEHAVIOUR ON SAME KEY INSERTS
+        if self.belongs_to_current(key_hash, node_hash).await {
+            let mut state = self.node.state.write().await;
+            state.data.remove(&key);
+            debug!("Deleted key '{}' locally", key);
+            Ok(())
+        }
+        // Otherwise, forward to the appropriate node (successor or predecessor)
+        else {
+            let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
+            else {key_hash - node_hash };
+            let request = Request::Delete { key };
+
+            // Forward to successor if it's closer, otherwise forward to predecessor
+            if (forward_dist < (1 << (N - 1))) && self.node.state.read().await.successor.is_some() {
+                let successor = self.node.state.read().await.successor.clone().unwrap();
+                self.send_request_no_response(successor.addr, request).await?;
+            } else {
+                let predecessor = self.node.state.read().await.predecessor.clone().unwrap();
+                self.send_request_no_response(predecessor.addr, request).await?;
+            }
+            Ok(())
+        }
+    }
+
 
     /// Get all ring members (bootstrap-specific)
     pub async fn get_ring_members(&self) -> Vec<NodeInfo> {
@@ -559,16 +697,21 @@ async fn handle_bootstrap_request(
             Response::Ok
         }
         
-        Request::Put { key, value } => {
+        Request::Insert { key, value } => {
             let mut state_guard = state.write().await;
             state_guard.data.insert(key.clone(), value);
             debug!("Bootstrap: Stored key '{}'", key);
             Response::Ok
         }
         
-        Request::Get { key } => {
+        Request::Query { key, source: _ } => {
             let state_guard = state.read().await;
             Response::Value(state_guard.data.get(&key).cloned())
+        }
+        
+        Request::QueryResponse { source: _, value: _ } => {
+            // Bootstrap doesn't need to handle query responses
+            Response::Ok
         }
         
         Request::Delete { key } => {
