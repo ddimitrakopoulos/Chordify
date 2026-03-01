@@ -7,6 +7,7 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use chordify::nodes::Node;
+use chordify::BootstrapNode;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -27,20 +28,19 @@ async fn main() -> anyhow::Result<()> {
         .map(|s| s.parse())
         .transpose()?;
 
-    // Create the node
-    let node = Node::new(addr);
-    info!("Node at {}", node.addr());
-
-    // Join existing ring or create new one
-    if let Some(known_addr) = join_addr {
-        info!("Joining ring via {}", known_addr);
-        node.join(known_addr).await?;
+    // Join existing ring or create new one as bootstrap
+    if let Some(bootstrap_addr) = join_addr {
+        // Join as regular node
+        info!("Joining ring via bootstrap at {}", bootstrap_addr);
+        let node = Node::new(addr);
+        node.join(bootstrap_addr).await?;
+        node.run().await
     } else {
-        info!("Creating new ring");
-        node.create_ring().await;
+        // Create new ring as bootstrap node
+        info!("Creating new ring as bootstrap node at {}", addr);
+        let bootstrap = BootstrapNode::new(addr);
+        bootstrap.create_ring().await;
+        bootstrap.run().await
     }
-
-    // Run the node (listens for requests)
-    node.run().await
 }
 
