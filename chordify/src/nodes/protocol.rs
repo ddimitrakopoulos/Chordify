@@ -23,6 +23,8 @@ impl NodeInfo {
 pub enum Request {
     /// Ping to check if node is alive
     Ping,
+    /// Join the ring via this node
+    Join { node: NodeInfo },
     /// Find the successor of a given address
     FindSuccessor { addr: SocketAddr },
     /// Get this node's predecessor
