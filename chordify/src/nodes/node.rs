@@ -3,6 +3,7 @@
 //! Uses the P2P communication layer for all network operations.
 //! All join/depart operations are coordinated by the bootstrap node.
 
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -12,7 +13,11 @@ use tracing::{info, debug, warn};
 use crate::tcp::{Server, connect};
 use super::protocol::{Request, Response, NodeInfo};
 
+use sha1::{Sha1, Digest};
+const N: u64 = 10; // Number of bits in the identifier space (SHA-1 hash size)
+
 /// A Chord DHT node
+#[derive(Debug)]
 pub struct Node {
     /// This node's info (address only)
     info: NodeInfo,
@@ -22,7 +27,18 @@ pub struct Node {
     bootstrap_addr: Option<SocketAddr>,
 }
 
+// Node is cheap to clone: the fields are `Clone`/`Arc`.
+impl Clone for Node {
+    fn clone(&self) -> Self {
+        Self {
+            info: self.info.clone(),
+            state: Arc::clone(&self.state),
+        }
+    }
+}
+
 /// Mutable state for a node
+#[derive(Debug)]
 pub struct NodeState {
     /// Our successor in the ring
     pub(crate) successor: Option<NodeInfo>,
@@ -44,7 +60,7 @@ impl Node {
         info!("Node created at {}", info.addr);
         Self { info, state, bootstrap_addr: None }
     }
-
+    
     /// Set bootstrap node address (required for join/depart operations)
     pub fn with_bootstrap(mut self, bootstrap_addr: SocketAddr) -> Self {
         self.bootstrap_addr = Some(bootstrap_addr);
@@ -134,14 +150,12 @@ impl Node {
     /// Start listening and handling requests
     pub async fn run(&self) -> anyhow::Result<()> {
         let server = Server::bind(self.info.addr).await?;
-        let state = Arc::clone(&self.state);
-        let info = self.info.clone();
+        // wrap `self` in an Arc so the handler can keep a reference long-term
+        let node = Arc::new(self.clone());
+
         server.listen(move |request_bytes, from| {
-            let state = Arc::clone(&state);
-            let info = info.clone();
-            async move {
-                handle_request(request_bytes, from, info, state).await
-            }
+            let node = Arc::clone(&node);
+            async move { node.handle_request(request_bytes, from).await }
         }).await
     }
 
@@ -186,131 +200,225 @@ impl Node {
         self.state.read().await.predecessor.clone()
     }
 
-    /// Store a key-value pair (stores locally if we're responsible)
-    pub async fn put(&self, key: String, value: String) -> anyhow::Result<()> {
-        let successor = self.find_successor(self.info.addr).await?;
-        if successor.addr == self.info.addr {
-            // We're responsible for this key
+    /// Send a request and ignore the response; propagate errors if desired.
+    async fn send_request_no_response(&self, addr: SocketAddr, request: Request) -> anyhow::Result<()> {
+        let request_bytes = request.to_bytes()?;
+        connect(addr).await?.send(&request_bytes).await?;
+        Ok(())
+    }
+
+
+    // Forward message to closest node
+
+    // Auxuliary functions for hashing and key responsibility
+    fn hash_value(val: &str) -> u64 {
+        let mut hasher = Sha1::new();
+        hasher.update(val.as_bytes());
+        let hash = hasher.finalize();
+
+        // Calculate the hash value modulo 2^N
+        let hash_value = u64::from_be_bytes(hash[0..8].try_into().unwrap());
+        hash_value % (1 << N) // Assuming an N-bit identifier space
+    }
+
+    async fn belongs_to_current (&self, key_hash: u64, node_hash: u64) -> bool {
+        let prev = self.state.read().await.predecessor.clone();
+        let prev_hash = Self::hash_value(&prev.unwrap().addr.to_string());
+
+        (prev_hash < node_hash && key_hash > prev_hash && key_hash <= node_hash) ||
+        (prev_hash > node_hash && (key_hash > prev_hash || key_hash <= node_hash))
+    }
+
+
+    /// Insert a key-value pair
+    pub async fn insert(&self, key: String, value: String) -> anyhow::Result<()> {
+        // Hash the key to find its identifier
+        let key_hash = Self::hash_value(&key);
+        let node_hash = Self::hash_value(&self.info.addr.to_string());
+
+        debug!("Inserting key '{}' with hash {} (node hash {})", key, key_hash, node_hash);
+
+        // If responsible node for the key is this node, store it locally
+        // FIX ME: CHECK BEHAVIOUR ON SAME KEY INSERTS
+        if self.belongs_to_current(key_hash, node_hash).await {
             let mut state = self.state.write().await;
             state.data.insert(key.clone(), value);
             debug!("Stored key '{}' locally", key);
             Ok(())
-        } else {
-            // Forward to the responsible node
-            let request = Request::Put { key, value };
-            let response = self.send_request(successor.addr, request).await?;
-            match response {
-                Response::Ok => Ok(()),
-                Response::Error(e) => Err(anyhow::anyhow!("{}", e)),
-                _ => Err(anyhow::anyhow!("Unexpected response")),
-            }
         }
-    }
+        // Otherwise, forward to the appropriate node (successor or predecessor)
+        else {
+            let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
+            else {key_hash - node_hash };
+            let request = Request::Insert { key, value };
 
-    /// Get a value by key
-    pub async fn get(&self, key: &str) -> anyhow::Result<Option<String>> {
-        let successor = self.find_successor(self.info.addr).await?;
-        if successor.addr == self.info.addr {
-            // We're responsible for this key
-            let state = self.state.read().await;
-            Ok(state.data.get(key).cloned())
-        } else {
-            // Forward to the responsible node
-            let request = Request::Get { key: key.to_string() };
-            let response = self.send_request(successor.addr, request).await?;
-            match response {
-                Response::Value(v) => Ok(v),
-                Response::Error(e) => Err(anyhow::anyhow!("{}", e)),
-                _ => Err(anyhow::anyhow!("Unexpected response")),
-            }
-        }
-    }
-}
-
-/// Handle an incoming request
-async fn handle_request(
-    request_bytes: Vec<u8>,
-    from: SocketAddr,
-    info: NodeInfo,
-    state: Arc<RwLock<NodeState>>,
-) -> anyhow::Result<Vec<u8>> {
-    let request = Request::from_bytes(&request_bytes)?;
-    debug!("Received {:?} from {}", request, from);
-    let response = match request {
-        Request::Ping => Response::Pong,
-        
-        Request::FindSuccessor { addr: _ } => {
-            let state_guard = state.read().await;
-            if let Some(ref successor) = state_guard.successor {
-                Response::Successor(successor.clone())
+            // Forward to successor if it's closer, otherwise forward to predecessor
+            if (forward_dist < (1 << (N - 1))) && self.state.read().await.successor.is_some() {
+                let successor = self.state.read().await.successor.clone().unwrap();
+                self.send_request_no_response(successor.addr, request).await?;
             } else {
-                Response::Successor(info.clone())
+                let predecessor = self.state.read().await.predecessor.clone().unwrap();
+                self.send_request_no_response(predecessor.addr, request).await?;
+            }
+            Ok(())
+        }
+    }
+
+
+    /// Query function to retrieve a value by key
+    pub async fn query(&self, key: String) -> anyhow::Result<()> {
+        // Hash the key to find its identifier
+        let key_hash = Self::hash_value(&key);
+        let node_hash = Self::hash_value(&self.info.addr.to_string());
+
+        if key!="*" {
+            // If responsible node for the key is this node, retrieve it locally
+            if self.belongs_to_current(key_hash, node_hash).await {
+                let state = self.state.read().await;
+                let value = state.data.get(&key).cloned();
+                println!("{:?}", value);
+                Ok(())
+            }
+            // Otherwise, forward to the appropriate node (successor or predecessor)
+            else {
+                let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
+                else {key_hash - node_hash };
+                let request = Request::Query { key, source: self.info.addr };
+
+                // Forward to successor if it's closer, otherwise forward to predecessor
+                if (forward_dist < (1 << (N - 1))) && self.state.read().await.successor.is_some() {
+                    let successor = self.state.read().await.successor.clone().unwrap();
+                    self.send_request_no_response(successor.addr, request).await?;
+                } else {
+                    let predecessor = self.state.read().await.predecessor.clone().unwrap();
+                    self.send_request_no_response(predecessor.addr, request).await?;
+                }
+                Ok(())
             }
         }
-        
-        Request::GetPredecessor => {
-            let state_guard = state.read().await;
-            Response::Predecessor(state_guard.predecessor.clone())
+        else {
+            // Handle wildcard query: retrieve all key-value pairs from this node and forward to successor/predecessor
+            Ok(())
         }
-        
+    }
+
+
+    /// Delete a key-value pair
+    pub async fn delete(&self, key: String) -> anyhow::Result<()> {
+        // Hash the key to find its identifier
+        let key_hash = Self::hash_value(&key);
+        let node_hash = Self::hash_value(&self.info.addr.to_string());
+
+        debug!("Deleting key '{}' with hash {} (node hash {})", key, key_hash, node_hash);
+
+        // If responsible node for the key is this node, store it locally
+        // FIX ME: CHECK BEHAVIOUR ON SAME KEY INSERTS
+        if self.belongs_to_current(key_hash, node_hash).await {
+            let mut state = self.state.write().await;
+            state.data.remove(&key);
+            debug!("Deleted key '{}' locally", key);
+            Ok(())
+        }
+        // Otherwise, forward to the appropriate node (successor or predecessor)
+        else {
+            let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
+            else {key_hash - node_hash };
+            let request = Request::Delete { key };
+
+            // Forward to successor if it's closer, otherwise forward to predecessor
+            if (forward_dist < (1 << (N - 1))) && self.state.read().await.successor.is_some() {
+                let successor = self.state.read().await.successor.clone().unwrap();
+                self.send_request_no_response(successor.addr, request).await?;
+            } else {
+                let predecessor = self.state.read().await.predecessor.clone().unwrap();
+                self.send_request_no_response(predecessor.addr, request).await?;
+            }
+            Ok(())
+        }
+    
+    }
+
+
+    /// Handle an incoming request
+    async fn handle_request(&self, request_bytes: Vec<u8>, from: SocketAddr)
+    -> anyhow::Result<Vec<u8>> {
+        let request = Request::from_bytes(&request_bytes)?;
+        debug!("Received {:?} from {}", request, from);
+        let response = match request {
+            Request::Ping => Response::Pong,
+            Request::FindSuccessor { addr: _ } => {
+                let state_guard = self.state.read().await;
+                if let Some(ref successor) = state_guard.successor {
+                    if successor.addr == self.info.addr {
+                        Response::Successor(successor.clone())
+                    } else {
+                        Response::Successor(successor.clone())
+                    }
+                } else {
+                    Response::Successor(self.info.clone())
+                }
+            }
+            Request::GetPredecessor => {
+                let state_guard = self.state.read().await;
+                Response::Predecessor(state_guard.predecessor.clone())
+            }
         Request::GetSuccessor => {
-            let state_guard = state.read().await;
-            Response::Successor(state_guard.successor.clone().unwrap_or(info.clone()))
+            let state_guard = self.state.read().await;
+            Response::Successor(state_guard.successor.clone().unwrap_or(self.info.clone()))
         }
         
         Request::SetPredecessor { node } => {
-            let mut state_guard = state.write().await;
+            let mut state_guard = self.state.write().await;
             state_guard.predecessor = Some(node.clone());
             info!("Set predecessor to {}", node.addr);
             Response::Ok
         }
         
         Request::SetSuccessor { node } => {
-            let mut state_guard = state.write().await;
+            let mut state_guard = self.state.write().await;
             state_guard.successor = Some(node.clone());
             info!("Set successor to {}", node.addr);
             Response::Ok
         }
-        
-        Request::Notify { node } => {
-            let mut state_guard = state.write().await;
-            // Update predecessor if needed
-            if state_guard.predecessor.is_none() {
-                state_guard.predecessor = Some(node.clone());
-                info!("Set predecessor to {}", node.addr);
-            } else if let Some(ref pred) = state_guard.predecessor {
-                if node.addr != pred.addr {
+            Request::Notify { node } => {
+                let mut state_guard = self.state.write().await;
+                // Update predecessor if needed
+                if state_guard.predecessor.is_none() {
                     state_guard.predecessor = Some(node.clone());
-                    info!("Updated predecessor to {}", node.addr);
+                    info!("Set predecessor to {}", node.addr);
+                } else if let Some(ref pred) = state_guard.predecessor {
+                    if node.addr != pred.addr {
+                        state_guard.predecessor = Some(node.clone());
+                        info!("Updated predecessor to {}", node.addr);
+                    }
                 }
+                Response::Ok
             }
-            Response::Ok
-        }
         
-        Request::JoinRequest { joining_node: _ } => {
+            Request::JoinRequest { joining_node: _ } => {
             // Regular nodes don't handle JoinRequest - only bootstrap does
             warn!("Regular node received JoinRequest - should be sent to bootstrap");
             Response::Error("JoinRequest should be sent to bootstrap node".to_string())
         }
-        
+
         Request::DepartRequest { departing_node: _ } => {
             // Regular nodes don't handle DepartRequest - only bootstrap does
             warn!("Regular node received DepartRequest - should be sent to bootstrap");
             Response::Error("DepartRequest should be sent to bootstrap node".to_string())
         }
-        
+
         Request::TransferKeys { to_addr: _ } => {
             // Transfer all keys (bootstrap-coordinated transfer)
-            let mut state_guard = state.write().await;
+            let mut state_guard = self.state.write().await;
             let keys: Vec<(String, String)> = state_guard.data.drain().collect();
             info!("Transferring {} keys", keys.len());
             Response::Keys(keys)
         }
-        
+
         Request::TransferKeysTo { target_addr } => {
             // Bootstrap told us to transfer our keys to target
             let keys = {
-                let mut state_guard = state.write().await;
+                let mut state_guard = self.state.write().await;
                 state_guard.data.drain().collect::<Vec<_>>()
             };
             info!("TransferKeysTo {}: {} keys", target_addr, keys.len());
@@ -333,7 +441,7 @@ async fn handle_request(
         }
         
         Request::ReceiveKeys { keys } => {
-            let mut state_guard = state.write().await;
+            let mut state_guard = self.state.write().await;
             let count = keys.len();
             for (key, value) in keys {
                 state_guard.data.insert(key, value);
@@ -341,25 +449,83 @@ async fn handle_request(
             info!("Received {} keys", count);
             Response::Ok
         }
-        
-        Request::Put { key, value } => {
-            let mut state_guard = state.write().await;
-            state_guard.data.insert(key.clone(), value);
-            debug!("Stored key '{}'", key);
-            Response::Ok
-        }
-        
-        Request::Get { key } => {
-            let state_guard = state.read().await;
-            Response::Value(state_guard.data.get(&key).cloned())
-        }
-        
-        Request::Delete { key } => {
-            let mut state_guard = state.write().await;
-            state_guard.data.remove(&key);
-            debug!("Deleted key '{}'", key);
-            Response::Ok
-        }
-    };
-    response.to_bytes()
+
+            Request::Insert { key, value } => {
+                match self.insert(key, value).await {
+                    Ok(()) => Response::Ok,
+                    Err(e) => Response::Error(e.to_string()),
+                }
+            }
+            Request::Query { key, source } => {
+                // Hash the key to find its identifier
+                let key_hash = Self::hash_value(&key);
+                let node_hash = Self::hash_value(&self.info.addr.to_string());
+
+                
+                // If responsible node for the key is this node, retrieve it locally
+                if self.belongs_to_current(key_hash, node_hash).await {
+                    let state = self.state.read().await;
+                    let value = state.data.get(&key).cloned();
+                    let predecessor = self.state.read().await.predecessor.clone().unwrap();
+                    let request = Request::QueryResponse { source, value };
+                    self.send_request_no_response(predecessor.addr, request).await?;
+                }
+                // Otherwise, forward to the appropriate node (successor or predecessor)
+                else {
+                    let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
+                    else {key_hash - node_hash };
+                    let request = Request::Query { key, source };
+
+                    // Forward to successor if it's closer, otherwise forward to predecessor
+                    if (forward_dist < (1 << (N - 1))) && self.state.read().await.successor.is_some() {
+                        let successor = self.state.read().await.successor.clone().unwrap();
+                        self.send_request_no_response(successor.addr, request).await?;
+                    } else {
+                        let predecessor = self.state.read().await.predecessor.clone().unwrap();
+                        self.send_request_no_response(predecessor.addr, request).await?;
+                    }
+                }
+                Response::Ok
+                
+            }
+            Request::QueryResponse { source, value } => {
+                if source == self.info.addr {
+                    println!("{:?}", value);
+                    Response::Ok
+                } else {
+                    // Forward the response back to the original requester
+                    let request = Request::QueryResponse { source, value };
+                    let source_hash = Self::hash_value(&source.to_string());
+                    let node_hash = Self::hash_value(&self.info.addr.to_string());
+                    let forward_dist = if node_hash >= source_hash {(1 << N) - node_hash + source_hash } 
+                    else {source_hash - node_hash };
+
+                    // Forward to successor if it's closer, otherwise forward to predecessor
+                    if (forward_dist < (1 << (N - 1))) && self.state.read().await.successor.is_some() {
+                        let successor = self.state.read().await.successor.clone().unwrap();
+                        self.send_request_no_response(successor.addr, request).await?;
+                    } else {
+                        let predecessor = self.state.read().await.predecessor.clone().unwrap();
+                        self.send_request_no_response(predecessor.addr, request).await?;
+                    }
+                    Response::Ok
+                }
+            }
+            Request::Delete { key } => {
+                match self.delete(key).await {
+                    Ok(()) => Response::Ok,
+                    Err(e) => Response::Error(e.to_string()),
+                }
+            }
+            _ => Response::Error("Unsupported request type".to_string()),
+            // Request::Delete { key } => {
+            //     let mut state_guard = state.write().await;
+            //     state_guard.data.remove(&key);
+            //     debug!("Deleted key '{}'", key);
+            //     Response::Ok
+            // }
+        };
+        response.to_bytes()
+
+    }
 }

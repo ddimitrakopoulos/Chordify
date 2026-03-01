@@ -38,9 +38,11 @@ pub enum Request {
     /// Request keys to transfer (returns all keys)
     TransferKeys { to_addr: SocketAddr },
     /// Store a key-value pair
-    Put { key: String, value: String },
+    Insert { key: String, value: String },
     /// Retrieve a value by key
-    Get { key: String },
+    Query { key: String, source: SocketAddr },
+    /// Query response for a key
+    QueryResponse { source: SocketAddr, value: Option<String> },
     /// Delete a key
     Delete { key: String },
     
