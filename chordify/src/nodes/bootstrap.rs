@@ -344,20 +344,16 @@ impl BootstrapNode {
         }).await
     }
 
+    /// BootstrapNode cannot join an existing ring (it always creates one)
+    pub async fn join(&self, _bootstrap_addr: SocketAddr) -> anyhow::Result<()> {
+        warn!("Bootstrap node cannot join - it must create a new ring instead");
+        Err(anyhow::anyhow!("BootstrapNode cannot join an existing ring. Use create_ring() instead."))
+    }
+
     /// Prevent bootstrap from departing (bootstrap never departs)
     pub async fn depart(&self) -> anyhow::Result<()> {
         warn!("Bootstrap node cannot depart - it must always stay connected");
         Err(anyhow::anyhow!("Bootstrap node cannot depart"))
-    }
-
-    /// BootstrapNode cannot join an existing ring (it always creates one)
-    pub async fn join(&self, _bootstrap_addr: SocketAddr) -> anyhow::Result<()> {
-        Err(anyhow::anyhow!("BootstrapNode cannot join an existing ring. It must create a new ring."))
-    }
-
-    /// BootstrapNode cannot depart from the ring (it is always present)
-    pub async fn depart(&self, _bootstrap_addr: SocketAddr) -> anyhow::Result<()> {
-        Err(anyhow::anyhow!("BootstrapNode cannot depart from the ring. It must always be present."))
     }
 }
 
