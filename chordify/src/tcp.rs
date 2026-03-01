@@ -7,7 +7,7 @@
 //!     Server: listens for incoming connections and handles requests
 //!     Client: opens a connection, sends a message, waits for a response and then closes the connection
 //! 
-//!
+//! ```text
 //! Basic usage example:
 //!                           Node A                          Node B
 //!     
@@ -20,7 +20,7 @@
 //!  (receive response bytes)  |<------- response() -----------|  (send response bytes)
 //!                            |                               |
 //!        (close connection)  |                               | 
-//!
+//! ```
 
 use std::net::SocketAddr; // IP address + port
 use std::sync::Arc; // Atomic Reference Counted: A smart pointer allowing thread-safe (read only!) reference-counted access to the handler across connections 
