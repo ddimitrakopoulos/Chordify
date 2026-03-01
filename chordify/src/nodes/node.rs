@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, debug};
 
-use crate::communication::{Peer, connect};
+use crate::tcp::{Server, connect};
 use super::protocol::{Request, Response, NodeInfo};
 
 /// A Chord DHT node
@@ -80,7 +80,7 @@ impl Node {
 
     /// Start listening and handling requests
     pub async fn run(&self) -> anyhow::Result<()> {
-        let peer = Peer::bind(self.info.addr).await?;
+        let peer = Server::bind(self.info.addr).await?;
         let state = Arc::clone(&self.state);
         let info = self.info.clone();
         peer.listen(move |request_bytes, from| {

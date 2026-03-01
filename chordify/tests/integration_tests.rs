@@ -1,6 +1,6 @@
 //! Integration tests for P2P communication: Connect → Message → Response
 
-use chordify::communication::{Peer, connect, connect_with_timeout};
+use chordify::tcp::{Server, connect, connect_with_timeout};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -19,14 +19,14 @@ fn get_test_addr(port: u16) -> SocketAddr {
     format!("127.0.0.1:{}", port).parse().unwrap()
 }
 
-// ==================== Peer Tests ====================
+// ==================== Server Tests ====================
 
 #[tokio::test]
 async fn test_peer_bind() {
     let addr = get_test_addr(19000);
-    let peer = Peer::bind(addr).await.unwrap();
-    tprintln!("Peer bound to {}", peer.addr());
-    assert_eq!(peer.addr(), addr);
+    let peer = Server::bind(addr).await.unwrap();
+    tprintln!("Server bound to {}", peer.get_addr());
+    assert_eq!(peer.get_addr(), addr);
 }
 
 // ==================== Connect → Message → Response Tests ====================
@@ -36,7 +36,7 @@ async fn test_connect_message_response() {
     let server_addr = get_test_addr(19010);
     tprintln!("Starting echo peer at {}", server_addr);
     tokio::spawn(async move {
-        let peer = Peer::bind(server_addr).await.unwrap();
+        let peer = Server::bind(server_addr).await.unwrap();
         let _ = peer.listen(|request, _from| async move {
             Ok(request) // echo
         }).await;
@@ -59,9 +59,9 @@ async fn test_connect_send_fire_and_forget() {
     let server_addr = get_test_addr(19011);
     tprintln!("Starting fire-and-forget peer at {}", server_addr);
     tokio::spawn(async move {
-        let peer = Peer::bind(server_addr).await.unwrap();
+        let peer = Server::bind(server_addr).await.unwrap();
         let _ = peer.listen(|request, _from| async move {
-            tprintln!("Peer received: {:?}", request);
+            tprintln!("Server received: {:?}", request);
             assert_eq!(request, b"fire-and-forget");
             Ok(Vec::new())
         }).await;
@@ -81,7 +81,7 @@ async fn test_multiple_sequential_requests() {
     let server_addr = get_test_addr(19020);
     
     tokio::spawn(async move {
-        let peer = Peer::bind(server_addr).await.unwrap();
+        let peer = Server::bind(server_addr).await.unwrap();
         let _ = peer.listen(|request, _from| async move {
             Ok(request) // echo
         }).await;
@@ -122,7 +122,7 @@ async fn test_large_message() {
     let server_addr = get_test_addr(19030);
     
     tokio::spawn(async move {
-        let peer = Peer::bind(server_addr).await.unwrap();
+        let peer = Server::bind(server_addr).await.unwrap();
         let _ = peer.listen(|request, _from| async move {
             Ok(request) // echo
         }).await;
@@ -148,7 +148,7 @@ async fn test_concurrent_connections() {
     let server_addr = get_test_addr(19040);
     
     tokio::spawn(async move {
-        let peer = Peer::bind(server_addr).await.unwrap();
+        let peer = Server::bind(server_addr).await.unwrap();
         let _ = peer.listen(|request, _from| async move {
             Ok(request) // echo
         }).await;
@@ -182,7 +182,7 @@ async fn test_handler_receives_sender_address() {
     let server_addr = get_test_addr(19050);
     
     tokio::spawn(async move {
-        let peer = Peer::bind(server_addr).await.unwrap();
+        let peer = Server::bind(server_addr).await.unwrap();
         let _ = peer.listen(|_request, from| async move {
             // Return the sender's port as response
             Ok(from.port().to_string().into_bytes())
@@ -209,7 +209,7 @@ async fn test_handler_can_process_request() {
     let server_addr = get_test_addr(19060);
     
     tokio::spawn(async move {
-        let peer = Peer::bind(server_addr).await.unwrap();
+        let peer = Server::bind(server_addr).await.unwrap();
         let _ = peer.listen(|request, _from| async move {
             // Reverse the request bytes
             let mut reversed = request;
@@ -325,12 +325,12 @@ async fn test_nodes_specific_ports_and_responses() {
         let addr = *addr;
         tprintln!("Starting peer at {}", addr);
         handles.push(tokio::spawn(async move {
-            let peer = Peer::bind(addr).await.unwrap();
+            let peer = Server::bind(addr).await.unwrap();
             let _ = peer.listen(move |request, _from| async move {
-                tprintln!("Peer {} received: {:?}", addr, request);
+                tprintln!("Server {} received: {:?}", addr, request);
                 let mut response = request.clone();
                 response.extend_from_slice(b" received");
-                tprintln!("Peer {} responding: {:?}", addr, response);
+                tprintln!("Server {} responding: {:?}", addr, response);
                 Ok(response)
             }).await;
         }));
