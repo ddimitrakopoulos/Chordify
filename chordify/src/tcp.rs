@@ -1,6 +1,6 @@
 //! A TCP communication module with a Server/Client API.
 //!
-//! The code provides a simple API for sending and receiving messages between nodes,,
+//! The code provides a simple API for sending and receiving messages between nodes,
 //! abstracting away the underlying TCP connections and message framing.
 //! It doesn't make any assumptions about the application-level protocol; it simply sends and receives raw bytes.
 //! The main components are: 
