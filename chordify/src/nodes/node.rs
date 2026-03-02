@@ -240,16 +240,6 @@ impl Node {
         Ok(())
     }
 
-    async fn belongs_to_current (&self, key_hash: u64, node_hash: u64) -> bool {
-        let prev = self.state.read().await.predecessor.clone();
-        let prev_hash = hash_value(&prev.addr.to_string());
-
-        (prev_hash < node_hash && key_hash > prev_hash && key_hash <= node_hash) ||
-        (prev_hash > node_hash && (key_hash > prev_hash || key_hash <= node_hash)) ||
-        (prev_hash == node_hash) // Only node in the ring
-    }
-
-
     /// Insert a key-value pair
     pub async fn insert(&self, key: String, value: String) -> anyhow::Result<()> {
         // Hash the key to find its identifier
@@ -321,6 +311,7 @@ impl Node {
             let data_clone = state.data.clone();
             drop(state); // Release the lock before sending
 
+            let node_hash = self.info.id;
             let request = Request::QueryAll { source: self.info.addr, data: vec![(node_hash, data_clone)] };
 
             // Forward to successor and predecessor
