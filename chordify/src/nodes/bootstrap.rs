@@ -10,7 +10,7 @@ use tracing::{info, debug, warn};
 
 use crate::tcp::{Server, connect};
 use super::protocol::{Request, Response};
-use super::node::{Node, NodeState, NodeInfo};
+use super::node::{NodeInfo};
 
 use sha1::{Sha1, Digest};
 const N: u64 = 10; // Number of bits in the identifier space (SHA-1 hash size)
@@ -162,13 +162,13 @@ impl BootstrapNode {
     /// 5. Registers the node in the ring
     pub async fn coordinate_join(&self, joining_addr: SocketAddr) -> anyhow::Result<(NodeInfo, NodeInfo)> {
         info!("Bootstrap coordinating join for {}", joining_addr);
-        let joining_node = NodeInfo::new(joining_addr);
+        let joining_node = NodeInfo { addr: joining_addr, id: hash_string_to_u64(&joining_addr.to_string()) };
 
-        let mut successor = None;
-        let mut predecessor = None;
-        
+        let mut successor = NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: 0 };
+        let mut predecessor = NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: 0 };
+
         let id = hash_string_to_u64(&joining_addr.to_string());
-        if(&self.ring_members.read().await.len() == 0) {
+        if self.ring_members.read().await.len() == 0 {
             // If no members, the joining node becomes the only member
             successor = joining_node.clone();
             predecessor = joining_node.clone();
@@ -180,7 +180,7 @@ impl BootstrapNode {
 
             for member in members.iter() {
                 let member_id = &member.id;
-                if member_id >= id {
+                if *member_id >= id {
                     successor = member.clone();
                     break;
                 }
@@ -188,19 +188,18 @@ impl BootstrapNode {
             }
 
             // If we reached the end of the list, the successor is the first member (ring wrap-around)
-            if successor.is_none() {
-                successor = members.first().cloned();
+            if successor == (NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: 0 }) {
+                successor = members.first().cloned().expect("Ring members should not be empty here");
             }
 
             // If predecessor is still None, it means the predecessor is the last member in the list (ring wrap-around)
-            if predecessor.is_none() {
-                predecessor = members.last().cloned();
+            if predecessor == (NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: 0 }) {
+                predecessor = members.last().cloned().expect("Ring members should not be empty here");
             }
         }
 
         self.register_node(joining_node.clone()).await;
-        info!("Join coordination: {} with successor {} and predecessor {}", joining_addr, successor.unwrap().addr, predecessor.unwrap().addr);
-            
+        info!("Join coordination: {} with successor {} and predecessor {}", joining_addr, successor.addr, predecessor.addr);
 
         // Notify the successor and predecessor about the new node (if they exist and are not the joining node itself)
         if successor.addr != joining_addr {
@@ -214,12 +213,12 @@ impl BootstrapNode {
         }
 
 
-        if pred.addr != joining_addr {
+        if predecessor.addr != joining_addr {
             match self.send_request(
-                pred.addr,
+                predecessor.addr,
                 Request::SetSuccessor { node: joining_node.clone() }
             ).await {
-                Ok(_) => info!("Notified predecessor {} about joining node {}", pred.addr, joining_addr),
+                Ok(_) => info!("Notified predecessor {} about joining node {}", predecessor.addr, joining_addr),
                 Err(e) => warn!("Failed to notify predecessor: {}", e),
             }
         }
@@ -241,11 +240,10 @@ impl BootstrapNode {
         info!("Bootstrap coordinating depart for {}", departing_addr);
         
         // Find the departing node's successor and predecessor from the ring members
-        let members = self.ring_members.write().await;
+        let mut members = self.ring_members.write().await;
         let len = members.len();
-        let mut successor = None;
-        let mut predecessor = None;
-        let departing_node_info = None;
+        let mut successor = NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: 0 };
+        let mut predecessor = NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: 0 };
         for (i, member) in members.iter().enumerate() {
             if member.addr == departing_addr {
                 // Successor is the next element, wrapping around to the first element if at the end
@@ -260,22 +258,22 @@ impl BootstrapNode {
         }
         
         // Inform the successor and predecessor of departing node to change their pointers
-        if succ.addr != departing_addr {
+        if successor.addr != departing_addr {
             match self.send_request(
-                succ.addr,
-                Request::SetPredecessor { node: predecessor.clone().unwrap() }
+                successor.addr,
+                Request::SetPredecessor { node: predecessor.clone() }
             ).await {
-                Ok(_) => info!("Notified successor {} about departing node {}", succ.addr, departing_addr),
+                Ok(_) => info!("Notified successor {} about departing node {}", successor.addr, departing_addr),
                 Err(e) => warn!("Failed to notify successor: {}", e),
             }
         }
 
-        if pred.addr != departing_addr {
+        if predecessor.addr != departing_addr {
             match self.send_request(
-                pred.addr,
+                predecessor.addr,
                 Request::SetSuccessor { node: successor.clone() }
             ).await {
-                Ok(_) => info!("Notified predecessor {} about departing node {}", pred.addr, departing_addr),
+                Ok(_) => info!("Notified predecessor {} about departing node {}", predecessor.addr, departing_addr),
                 Err(e) => warn!("Failed to notify predecessor: {}", e),
             }
         }

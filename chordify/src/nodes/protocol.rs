@@ -13,14 +13,6 @@ use super::node::NodeInfo;
 pub enum Request {
     /// Ping to check if node is alive
     Ping,
-    /// Find the successor of a given address
-    FindSuccessor { addr: SocketAddr },
-    /// Get this node's predecessor
-    GetPredecessor,
-    /// Get this node's successor
-    GetSuccessor,
-    /// Notify node that we might be its predecessor
-    Notify { node: NodeInfo },
     /// Set this node's predecessor and transfer keys later
     SetPredecessorWithKeys { node: NodeInfo },
     /// Set this node's predecessor directly (sent by bootstrap during coordination)

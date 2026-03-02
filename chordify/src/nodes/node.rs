@@ -17,15 +17,16 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, debug, warn};
+use tracing::{info, debug};
 
 use crate::tcp::{Server, connect};
 use super::protocol::{Request, Response};
 
 use sha1::{Sha1, Digest}; // SHA-1 is used for hashing the IP:port to get the node ID (160-bit hash)
+use serde::{Serialize, Deserialize};
 const N: u64 = 10;
 
-#[derive(Debug, Clone)]
+#[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
 pub struct NodeInfo {
     // IP:Port address of the node (this is only 4+2 bytes and lives in the stack Copy)
     pub addr: SocketAddr,
@@ -44,6 +45,7 @@ pub struct Node {
     bootstrap_addr: SocketAddr,
 }
 
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct NodeState {
     // The ID of the successor in the ring
     successor: NodeInfo,
@@ -79,8 +81,8 @@ impl Node {
                 id: hash_value(&addr.to_string()),
             },
             state: Arc::new(RwLock::new(NodeState {
-                successor: NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: -1 },
-                predecessor: NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: -1 }, 
+                successor: NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: 0 },
+                predecessor: NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: 0 }, 
                 data: HashMap::new(), 
             })),
             bootstrap_addr   
@@ -107,32 +109,30 @@ impl Node {
     }
 
     /// Check if this node is responsible for a given key ID
-    pub async fn is_responsible(&self, key_id: &u64) -> bool {
+    pub async fn is_responsible(&self, key_id: &String) -> bool {
+        let key_id_hash = hash_value(key_id);
         // We read the predecessor under a lock to ensure we have a consistent view of the ring
         // state while checking responsibility. We await until we can acquire the lock.
         let predecessor_guard = self.state.read().await.predecessor.clone();
         
         // If there is no predecessor, then this node is the only node in the ring and is
         // responsible for all the keys
-        let predecessor_id = match &predecessor_guard {
-            predecessor => &predecessor.id,
-            None => return true,
-        };
+        let predecessor_id = predecessor_guard.id;
 
         // If the ID of the predecessor is the same as this node's ID, then again this node is
         // responsible for all keys
-        if predecessor_id == &self.info.id {
+        if predecessor_id == self.info.id {
             return true;
         }
 
         // Check if the key ID falls between the predecessor's ID and this node's ID
         // Normal case:
-        if predecessor_id < &self.info.id {
-            key_id > predecessor_id && key_id <= &self.info.id
+        if predecessor_id < self.info.id {
+            key_id_hash > predecessor_id && key_id_hash <= self.info.id
         } 
         // Wrap-around case:
         else { 
-            key_id > predecessor_id || key_id <= &self.info.id
+            key_id_hash > predecessor_id || key_id_hash <= self.info.id
         }
     }
 
@@ -168,7 +168,7 @@ impl Node {
                 state.predecessor = predecessor.clone();
                 
                 info!("Joined ring via bootstrap: successor={}, predecessor={:?}", 
-                      successor.addr, predecessor.as_ref().map(|p| p.addr));
+                      successor.addr, predecessor.addr);
                 Ok(())
             }
             Response::Error(e) => Err(anyhow::anyhow!("Join failed: {}", e)),
@@ -199,8 +199,8 @@ impl Node {
             Response::DepartSuccess => {
                 // Clear local state
                 let mut state = self.state.write().await;
-                state.successor = None;
-                state.predecessor = None;
+                state.successor = NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: 0 };
+                state.predecessor = NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: 0 };
                 state.data.clear();
                 
                 info!("Departed ring via bootstrap");
@@ -233,7 +233,7 @@ impl Node {
 
     async fn belongs_to_current (&self, key_hash: u64, node_hash: u64) -> bool {
         let prev = self.state.read().await.predecessor.clone();
-        let prev_hash = hash_value(&prev.unwrap().addr.to_string());
+        let prev_hash = hash_value(&prev.addr.to_string());
 
         (prev_hash < node_hash && key_hash > prev_hash && key_hash <= node_hash) ||
         (prev_hash > node_hash && (key_hash > prev_hash || key_hash <= node_hash))
@@ -263,11 +263,11 @@ impl Node {
             let request = Request::Insert { key, value };
 
             // Forward to successor if it's closer, otherwise forward to predecessor
-            if (forward_dist < (1 << (N - 1))) && self.state.read().await.successor.is_some() {
-                let successor = self.state.read().await.successor.clone().unwrap();
+            if forward_dist < (1 << (N - 1)){
+                let successor = self.state.read().await.successor.clone();
                 self.send_request_no_response(successor.addr, request).await?;
             } else {
-                let predecessor = self.state.read().await.predecessor.clone().unwrap();
+                let predecessor = self.state.read().await.predecessor.clone();
                 self.send_request_no_response(predecessor.addr, request).await?;
             }
             Ok(())
@@ -296,11 +296,11 @@ impl Node {
                 let request = Request::Query { key, source: self.info.addr };
 
                 // Forward to successor if it's closer, otherwise forward to predecessor
-                if (forward_dist < (1 << (N - 1))) && self.state.read().await.successor.is_some() {
-                    let successor = self.state.read().await.successor.clone().unwrap();
+                if forward_dist < (1 << (N - 1)) {
+                    let successor = self.state.read().await.successor.clone();
                     self.send_request_no_response(successor.addr, request).await?;
                 } else {
-                    let predecessor = self.state.read().await.predecessor.clone().unwrap();
+                    let predecessor = self.state.read().await.predecessor.clone();
                     self.send_request_no_response(predecessor.addr, request).await?;
                 }
                 Ok(())
@@ -336,11 +336,11 @@ impl Node {
             let request = Request::Delete { key };
 
             // Forward to successor if it's closer, otherwise forward to predecessor
-            if (forward_dist < (1 << (N - 1))) && self.state.read().await.successor.is_some() {
-                let successor = self.state.read().await.successor.clone().unwrap();
+            if forward_dist < (1 << (N - 1))  {
+                let successor = self.state.read().await.successor.clone();
                 self.send_request_no_response(successor.addr, request).await?;
             } else {
-                let predecessor = self.state.read().await.predecessor.clone().unwrap();
+                let predecessor = self.state.read().await.predecessor.clone();
                 self.send_request_no_response(predecessor.addr, request).await?;
             }
             Ok(())
@@ -379,7 +379,7 @@ impl Node {
                 // Find the data that should be transferred to the new predecessor (keys for which the new predecessor is now responsible)
                 let new_data = HashMap::new();
                 for (key, value) in state_guard.data.iter() {
-                    if(!self.is_responsible(key).await) {
+                    if !self.is_responsible(key).await {
                         new_data.insert(key.clone(), value.clone());
                     }
                 }
@@ -407,7 +407,7 @@ impl Node {
                 if self.belongs_to_current(key_hash, node_hash).await {
                     let state = self.state.read().await;
                     let value = state.data.get(&key).cloned();
-                    let predecessor = self.state.read().await.predecessor.clone().unwrap();
+                    let predecessor = self.state.read().await.predecessor.clone();
                     let request = Request::QueryResponse { source, value };
                     self.send_request_no_response(predecessor.addr, request).await?;
                 }
@@ -418,11 +418,11 @@ impl Node {
                     let request = Request::Query { key, source };
 
                     // Forward to successor if it's closer, otherwise forward to predecessor
-                    if (forward_dist < (1 << (N - 1))) && self.state.read().await.successor.is_some() {
-                        let successor = self.state.read().await.successor.clone().unwrap();
+                    if forward_dist < (1 << (N - 1)) {
+                        let successor = self.state.read().await.successor.clone();
                         self.send_request_no_response(successor.addr, request).await?;
                     } else {
-                        let predecessor = self.state.read().await.predecessor.clone().unwrap();
+                        let predecessor = self.state.read().await.predecessor.clone();
                         self.send_request_no_response(predecessor.addr, request).await?;
                     }
                 }
@@ -443,11 +443,11 @@ impl Node {
                     else {source_hash - node_hash };
 
                     // Forward to successor if it's closer, otherwise forward to predecessor
-                    if (forward_dist < (1 << (N - 1))) && self.state.read().await.successor.is_some() {
-                        let successor = self.state.read().await.successor.clone().unwrap();
+                    if forward_dist < (1 << (N - 1)) {
+                        let successor = self.state.read().await.successor.clone();
                         self.send_request_no_response(successor.addr, request).await?;
                     } else {
-                        let predecessor = self.state.read().await.predecessor.clone().unwrap();
+                        let predecessor = self.state.read().await.predecessor.clone();
                         self.send_request_no_response(predecessor.addr, request).await?;
                     }
                     Response::Ok
