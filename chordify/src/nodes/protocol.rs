@@ -5,18 +5,8 @@
 
 use serde::{Serialize, Deserialize};
 use std::net::SocketAddr;
-
-/// Information about a node (address only)
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct NodeInfo {
-    pub addr: SocketAddr,
-}
-
-impl NodeInfo {
-    pub fn new(addr: SocketAddr) -> Self {
-        Self { addr }
-    }
-}
+use std::collections::HashMap;
+use super::node::NodeInfo;
 
 /// Request messages sent between nodes
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,7 +28,7 @@ pub enum Request {
     /// Set this node's successor directly (sent by bootstrap during coordination)
     SetSuccessor { node: NodeInfo },
     /// Request keys to transfer (returns all keys)
-    TransferKeys { to_addr: SocketAddr },
+    TransferData { data: HashMap<String, String> },
     /// Store a key-value pair
     Insert { key: String, value: String },
     /// Retrieve a value by key

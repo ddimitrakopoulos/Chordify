@@ -9,8 +9,8 @@ use tokio::sync::RwLock;
 use tracing::{info, debug, warn};
 
 use crate::tcp::{Server, connect};
-use super::protocol::{Request, Response, NodeInfo};
-use super::node::{Node, NodeState};
+use super::protocol::{Request, Response};
+use super::node::{Node, NodeState, NodeInfo};
 
 use sha1::{Sha1, Digest};
 const N: u64 = 10; // Number of bits in the identifier space (SHA-1 hash size)
@@ -42,7 +42,7 @@ pub fn hash_string_to_u64(data: &str) -> u64 {
     let result = hasher.finalize();
     
     // Convert the byte array to a u64
-    let hash_value = u64::from_be_bytes(hash[0..8].try_into().unwrap());
+    let hash_value = u64::from_be_bytes(result[0..8].try_into().unwrap());
     hash_value % (1 << N) // Assuming an N-bit identifier space
 }
 
@@ -160,7 +160,7 @@ impl BootstrapNode {
     /// 3. Updates the predecessor's successor pointer
     /// 4. Initiates key transfer from successor to joining node
     /// 5. Registers the node in the ring
-    pub async fn coordinate_join(&self, joining_addr: SocketAddr) -> anyhow::Result<(NodeInfo, Option<NodeInfo>)> {
+    pub async fn coordinate_join(&self, joining_addr: SocketAddr) -> anyhow::Result<(NodeInfo, NodeInfo)> {
         info!("Bootstrap coordinating join for {}", joining_addr);
         let joining_node = NodeInfo::new(joining_addr);
 
@@ -206,7 +206,7 @@ impl BootstrapNode {
         if successor.addr != joining_addr {
             match self.send_request(
                 successor.addr,
-                Request::SetSuccessor { node: joining_node.clone() }
+                Request::SetPredecessorWithKeys { node: joining_node.clone() }
             ).await {
                 Ok(_) => info!("Notified successor {} about joining node {}", successor.addr, joining_addr),
                 Err(e) => warn!("Failed to notify successor: {}", e),
@@ -217,7 +217,7 @@ impl BootstrapNode {
             if pred.addr != joining_addr {
                 match self.send_request(
                     pred.addr,
-                    Request::SetPredecessorWithKeys { node: joining_node.clone() }
+                    Request::SetSuccessor { node: joining_node.clone() }
                 ).await {
                     Ok(_) => info!("Notified predecessor {} about joining node {}", pred.addr, joining_addr),
                     Err(e) => warn!("Failed to notify predecessor: {}", e),
@@ -226,7 +226,7 @@ impl BootstrapNode {
         }
 
         info!("Join coordination complete for {}", joining_addr);
-        Ok((successor.unwrap(), predecessor.unwrap()))
+        Ok((successor, predecessor))
     }
 
     /// Handle a depart request from a node (BOOTSTRAP-COORDINATED)
@@ -241,7 +241,7 @@ impl BootstrapNode {
         info!("Bootstrap coordinating depart for {}", departing_addr);
         
         // Find the departing node's successor and predecessor from the ring members
-        let members = self.ring_members.read().await;
+        let members = self.ring_members.write().await;
         let len = members.len();
         let mut successor = None;
         let mut predecessor = None;
@@ -254,7 +254,7 @@ impl BootstrapNode {
                 predecessor = Some(members[(i + len - 1) % len].clone());
 
                 // Remove the departing node
-                self.ring_members.write().await.remove(i);
+                members.remove(i);
                 break;
             }
         }
@@ -264,7 +264,7 @@ impl BootstrapNode {
             if succ.addr != departing_addr {
                 match self.send_request(
                     succ.addr,
-                    Request::SetPredecessor { new_pred: predecessor.clone().unwrap_or(self.node.info()) }
+                    Request::SetPredecessor { node: predecessor.clone() }
                 ).await {
                     Ok(_) => info!("Notified successor {} about departing node {}", succ.addr, departing_addr),
                     Err(e) => warn!("Failed to notify successor: {}", e),
@@ -276,7 +276,7 @@ impl BootstrapNode {
             if pred.addr != departing_addr {
                 match self.send_request(
                     pred.addr,
-                    Request::SetSuccessor { new_succ: successor.clone() }
+                    Request::SetSuccessor { node: successor.clone() }
                 ).await {
                     Ok(_) => info!("Notified predecessor {} about departing node {}", pred.addr, departing_addr),
                     Err(e) => warn!("Failed to notify predecessor: {}", e),
