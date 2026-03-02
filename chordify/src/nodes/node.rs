@@ -196,7 +196,7 @@ impl Node {
             drop(state); // Release the lock before sending
             
             let request = Request::TransferData { data: data_clone };
-            if let Err(e) = self.send_request_no_response(successor.addr, request).await {
+            if let Err(_) = self.send_request_no_response(successor.addr, request).await {
                 //warn!("Failed to transfer data to successor during depart: {}", e);
             }
         }

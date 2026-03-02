@@ -94,12 +94,15 @@ impl BootstrapNode {
             Request::JoinRequest { joining_node } => {
                 // Bootstrap-coordinated join
                 match self.coordinate_join(joining_node.addr).await {
-                    Ok((successor, predecessor)) => Response::JoinSuccess { successor, predecessor },
+                    Ok((successor, predecessor)) => {
+                        Response::JoinSuccess { successor, predecessor } 
+                    },
                     Err(e) => {
                         warn!("Failed to coordinate join: {}", e);
                         Response::Error(format!("Join failed: {}", e))
                     }
                 }
+
             }
             
             Request::DepartRequest { departing_node } => {
