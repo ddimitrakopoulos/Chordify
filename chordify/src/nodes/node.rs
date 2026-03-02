@@ -46,9 +46,9 @@ pub struct Node {
 
 pub struct NodeState {
     // The ID of the successor in the ring
-    successor: Option<NodeInfo>,
+    successor: NodeInfo,
     // The ID of the predecessor in the ring
-    predecessor: Option<NodeInfo>,
+    predecessor: NodeInfo,
     // Local key-value storage
     data: HashMap<String, String>,
 }
@@ -79,8 +79,8 @@ impl Node {
                 id: hash_value(&addr.to_string()),
             },
             state: Arc::new(RwLock::new(NodeState {
-                successor: None, 
-                predecessor: None, 
+                successor: NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: -1 },
+                predecessor: NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: -1 }, 
                 data: HashMap::new(), 
             })),
             bootstrap_addr   
@@ -97,12 +97,12 @@ impl Node {
     }
 
         /// Get the successor
-    pub async fn get_successor(&self) -> Option<NodeInfo> {
+    pub async fn get_successor(&self) -> NodeInfo {
         self.state.read().await.successor.clone()
     }
 
     /// Get the predecessor
-    pub async fn get_predecessor(&self) -> Option<NodeInfo> {
+    pub async fn get_predecessor(&self) -> NodeInfo {
         self.state.read().await.predecessor.clone()
     }
 
@@ -115,7 +115,7 @@ impl Node {
         // If there is no predecessor, then this node is the only node in the ring and is
         // responsible for all the keys
         let predecessor_id = match &predecessor_guard {
-            Some(predecessor) => &predecessor.id,
+            predecessor => &predecessor.id,
             None => return true,
         };
 
@@ -185,12 +185,11 @@ impl Node {
 
         // Send all the data to the successor before departing
         let successor = self.get_successor().await;
-        if let Some(successor) = successor {
-            let state = self.state.read().await;
-            let data_clone = state.data.clone();
-            let request = Request::TransferData { data: data_clone };
-            self.send_request_no_response(successor.addr, request).await?;
-        }
+        let state = self.state.read().await;
+        let data_clone = state.data.clone();
+        let request = Request::TransferData { data: data_clone };
+        self.send_request_no_response(successor.addr, request).await?;
+
         
         // Send DepartRequest to bootstrap
         let request = Request::DepartRequest { departing_node: self.info.clone() };
@@ -360,21 +359,21 @@ impl Node {
 
             Request::SetPredecessor { node } => {
                 let mut state_guard = self.state.write().await;
-                state_guard.predecessor = Some(node.clone());
+                state_guard.predecessor = node.clone();
                 info!("Set predecessor to {}", node.addr);
                 Response::Ok
             }
             
             Request::SetSuccessor { node } => {
                 let mut state_guard = self.state.write().await;
-                state_guard.successor = Some(node.clone());
+                state_guard.successor = node.clone();
                 info!("Set successor to {}", node.addr);
                 Response::Ok
             }
 
             Request::SetPredecessorWithKeys { node } => {
                 let mut state_guard = self.state.write().await;
-                state_guard.predecessor = Some(node.clone());
+                state_guard.predecessor = node.clone();
                 info!("Set predecessor to {} with keys", node.addr);
 
                 // Find the data that should be transferred to the new predecessor (keys for which the new predecessor is now responsible)

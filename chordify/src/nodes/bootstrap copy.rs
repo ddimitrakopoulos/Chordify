@@ -290,7 +290,7 @@ impl BootstrapNode {
         if successor.addr == self.addr() {
             // Update bootstrap's own predecessor
             let mut state = self.node.state.write().await;
-            state.predecessor = Some(joining_node.clone());
+            state.predecessor = joining_node.clone();
             info!("Bootstrap: Set own predecessor to {}", joining_addr);
         } else {
             // Tell successor to update its predecessor
@@ -304,21 +304,19 @@ impl BootstrapNode {
         }
         
         // Step 4: Update predecessor's successor to the joining node
-        if let Some(ref pred) = predecessor {
-            if pred.addr == self.addr() {
-                // Update bootstrap's own successor
-                let mut state = self.node.state.write().await;
-                state.successor = Some(joining_node.clone());
-                info!("Bootstrap: Set own successor to {}", joining_addr);
-            } else if pred.addr != successor.addr {
-                // Tell predecessor to update its successor
-                match self.send_request(
-                    pred.addr,
-                    Request::SetSuccessor { node: joining_node.clone() }
-                ).await {
-                    Ok(_) => info!("Updated predecessor {}'s successor to {}", pred.addr, joining_addr),
-                    Err(e) => warn!("Failed to update predecessor's successor: {}", e),
-                }
+        if pred.addr == self.addr() {
+            // Update bootstrap's own successor
+            let mut state = self.node.state.write().await;
+            state.successor = joining_node.clone();
+            info!("Bootstrap: Set own successor to {}", joining_addr);
+        } else if pred.addr != successor.addr {
+            // Tell predecessor to update its successor
+            match self.send_request(
+                pred.addr,
+                Request::SetSuccessor { node: joining_node.clone() }
+            ).await {
+                Ok(_) => info!("Updated predecessor {}'s successor to {}", pred.addr, joining_addr),
+                Err(e) => warn!("Failed to update predecessor's successor: {}", e),
             }
         }
         
@@ -398,7 +396,7 @@ impl BootstrapNode {
         if successor.addr == self.addr() {
             // Update bootstrap's own predecessor
             let mut state = self.node.state.write().await;
-            state.predecessor = Some(new_pred_for_succ.clone());
+            state.predecessor = new_pred_for_succ.clone();
             info!("Bootstrap: Set own predecessor to {}", new_pred_for_succ.addr);
         } else {
             match self.send_request(
@@ -411,22 +409,21 @@ impl BootstrapNode {
         }
         
         // Step 3: Update predecessor's successor to the departing node's successor
-        if let Some(ref pred) = predecessor {
-            if pred.addr == self.addr() {
-                // Update bootstrap's own successor
-                let mut state = self.node.state.write().await;
-                state.successor = Some(successor.clone());
-                info!("Bootstrap: Set own successor to {}", successor.addr);
-            } else {
-                match self.send_request(
-                    pred.addr,
-                    Request::SetSuccessor { node: successor.clone() }
-                ).await {
-                    Ok(_) => info!("Updated predecessor {}'s successor to {}", pred.addr, successor.addr),
-                    Err(e) => warn!("Failed to update predecessor's successor: {}", e),
-                }
+        if pred.addr == self.addr() {
+            // Update bootstrap's own successor
+            let mut state = self.node.state.write().await;
+            state.successor = successor.clone();
+            info!("Bootstrap: Set own successor to {}", successor.addr);
+        } else {
+            match self.send_request(
+                pred.addr,
+                Request::SetSuccessor { node: successor.clone() }
+            ).await {
+                Ok(_) => info!("Updated predecessor {}'s successor to {}", pred.addr, successor.addr),
+                Err(e) => warn!("Failed to update predecessor's successor: {}", e),
             }
         }
+        
         
         // Step 4: Tell departing node to transfer keys to its successor
         if successor.addr != departing_addr {
@@ -513,14 +510,14 @@ async fn handle_bootstrap_request(
         
         Request::SetPredecessor { node } => {
             let mut state_guard = state.write().await;
-            state_guard.predecessor = Some(node.clone());
+            state_guard.predecessor = node.clone();
             info!("Bootstrap: Set predecessor to {}", node.addr);
             Response::Ok
         }
         
         Request::SetSuccessor { node } => {
             let mut state_guard = state.write().await;
-            state_guard.successor = Some(node.clone());
+            state_guard.successor = node.clone();
             info!("Bootstrap: Set successor to {}", node.addr);
             Response::Ok
         }
@@ -528,11 +525,12 @@ async fn handle_bootstrap_request(
         Request::Notify { node } => {
             let mut state_guard = state.write().await;
             if state_guard.predecessor.is_none() {
-                state_guard.predecessor = Some(node.clone());
+                state_guard.predecessor = node.clone();
                 info!("Bootstrap: Set predecessor to {}", node.addr);
-            } else if let Some(ref pred) = state_guard.predecessor {
+            } 
+            else {
                 if node.addr != pred.addr {
-                    state_guard.predecessor = Some(node.clone());
+                    state_guard.predecessor = node.clone();
                     info!("Bootstrap: Updated predecessor to {}", node.addr);
                 }
             }
@@ -555,13 +553,13 @@ async fn handle_bootstrap_request(
                 
                 // If bootstrap was alone, joining node becomes both successor and predecessor
                 if state_guard.successor.as_ref().map(|s| s.addr) == Some(info.addr) {
-                    state_guard.successor = Some(joining_node.clone());
-                    state_guard.predecessor = Some(joining_node.clone());
+                    state_guard.successor = joining_node.clone();
+                    state_guard.predecessor = joining_node.clone();
                 } else {
                     // If joining node should be bootstrap's successor (bootstrap is its predecessor)
                     if predecessor.as_ref().map(|p| p.addr) == Some(info.addr) ||
                        state_guard.predecessor.is_none() {
-                        state_guard.predecessor = Some(joining_node.clone());
+                        state_guard.predecessor = joining_node.clone();
                     }
                 }
             }

@@ -213,17 +213,17 @@ impl BootstrapNode {
             }
         }
 
-        if let Some(ref pred) = predecessor {
-            if pred.addr != joining_addr {
-                match self.send_request(
-                    pred.addr,
-                    Request::SetSuccessor { node: joining_node.clone() }
-                ).await {
-                    Ok(_) => info!("Notified predecessor {} about joining node {}", pred.addr, joining_addr),
-                    Err(e) => warn!("Failed to notify predecessor: {}", e),
-                }
+
+        if pred.addr != joining_addr {
+            match self.send_request(
+                pred.addr,
+                Request::SetSuccessor { node: joining_node.clone() }
+            ).await {
+                Ok(_) => info!("Notified predecessor {} about joining node {}", pred.addr, joining_addr),
+                Err(e) => warn!("Failed to notify predecessor: {}", e),
             }
         }
+        
 
         info!("Join coordination complete for {}", joining_addr);
         Ok((successor, predecessor))
@@ -249,9 +249,9 @@ impl BootstrapNode {
         for (i, member) in members.iter().enumerate() {
             if member.addr == departing_addr {
                 // Successor is the next element, wrapping around to the first element if at the end
-                successor = Some(members[(i + 1) % len].clone());
+                successor = members[(i + 1) % len].clone();
                 // Predecessor is the previous element, wrapping around to the last element if at the start
-                predecessor = Some(members[(i + len - 1) % len].clone());
+                predecessor = members[(i + len - 1) % len].clone();
 
                 // Remove the departing node
                 members.remove(i);
@@ -260,27 +260,23 @@ impl BootstrapNode {
         }
         
         // Inform the successor and predecessor of departing node to change their pointers
-        if let Some(ref succ) = successor {
-            if succ.addr != departing_addr {
-                match self.send_request(
-                    succ.addr,
-                    Request::SetPredecessor { node: predecessor.clone().unwrap() }
-                ).await {
-                    Ok(_) => info!("Notified successor {} about departing node {}", succ.addr, departing_addr),
-                    Err(e) => warn!("Failed to notify successor: {}", e),
-                }
+        if succ.addr != departing_addr {
+            match self.send_request(
+                succ.addr,
+                Request::SetPredecessor { node: predecessor.clone().unwrap() }
+            ).await {
+                Ok(_) => info!("Notified successor {} about departing node {}", succ.addr, departing_addr),
+                Err(e) => warn!("Failed to notify successor: {}", e),
             }
         }
 
-        if let Some(ref pred) = predecessor {
-            if pred.addr != departing_addr {
-                match self.send_request(
-                    pred.addr,
-                    Request::SetSuccessor { node: successor.clone() }
-                ).await {
-                    Ok(_) => info!("Notified predecessor {} about departing node {}", pred.addr, departing_addr),
-                    Err(e) => warn!("Failed to notify predecessor: {}", e),
-                }
+        if pred.addr != departing_addr {
+            match self.send_request(
+                pred.addr,
+                Request::SetSuccessor { node: successor.clone() }
+            ).await {
+                Ok(_) => info!("Notified predecessor {} about departing node {}", pred.addr, departing_addr),
+                Err(e) => warn!("Failed to notify predecessor: {}", e),
             }
         }
         
