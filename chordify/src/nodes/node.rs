@@ -136,15 +136,22 @@ impl Node {
         }
     }
 
-    /// Start listening and handling requests
-    pub async fn run(&self) -> anyhow::Result<()> {
+    // 1. Change `&self` to `self: Arc<Self>`
+    pub async fn run(self: Arc<Self>) -> anyhow::Result<()> {
         let server = Server::bind(self.info.addr).await?;
-        // wrap `self` in an Arc so the handler can keep a reference long-term
-        let node = Arc::new(self.clone());
+        
+        // 2. Now `self` IS an Arc<Node>, so we can clone it!
+        // This creates our owned Arc pointer for the outer closure.
+        let node_owned = Arc::clone(&self); 
 
         server.listen(move |request_bytes, from| {
-            let node = Arc::clone(&node);
-            async move { node.handle_request(request_bytes, from).await }
+            
+            // 3. Clone it again for the inner async block
+            let node_inner = Arc::clone(&node_owned); 
+            
+            async move { 
+                node_inner.handle_request(request_bytes, from).await 
+            }
         }).await
     }
 
