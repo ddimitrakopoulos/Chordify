@@ -8,6 +8,7 @@ use tracing_subscriber::FmtSubscriber;
 
 use chordify::nodes::Node;
 use chordify::BootstrapNode;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -32,14 +33,13 @@ async fn main() -> anyhow::Result<()> {
     if let Some(bootstrap_addr) = join_addr {
         // Join as regular node
         info!("Joining ring via bootstrap at {}", bootstrap_addr);
-        let node = Node::new(addr);
-        node.join(bootstrap_addr).await?;
-        node.run().await
+        let node = Node::new(addr, bootstrap_addr);
+        node.join().await?;
+        Arc::new(node).run().await
     } else {
         // Create new ring as bootstrap node
         info!("Creating new ring as bootstrap node at {}", addr);
         let bootstrap = BootstrapNode::new(addr);
-        bootstrap.create_ring().await;
         bootstrap.run().await
     }
 }

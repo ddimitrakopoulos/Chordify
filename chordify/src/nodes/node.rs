@@ -384,7 +384,7 @@ impl Node {
                 info!("Set predecessor to {} with keys", node.addr);
 
                 // Find the data that should be transferred to the new predecessor (keys for which the new predecessor is now responsible)
-                let new_data = HashMap::new();
+                let mut new_data = HashMap::new();
                 for (key, value) in state_guard.data.iter() {
                     if !self.is_responsible(key).await {
                         new_data.insert(key.clone(), value.clone());
@@ -466,7 +466,15 @@ impl Node {
                     Ok(()) => Response::Ok,
                     Err(e) => Response::Error(e.to_string()),
                 }
-            }
+            },
+            Request::TransferData { data } => {
+                for (key, value) in data {
+                    let mut state = self.state.write().await;
+                    state.data.insert(key, value);
+                }
+                Response::Ok
+            },
+            _ => Response::Error("Unsupported request".to_string()),
         };
         response.to_bytes()
 

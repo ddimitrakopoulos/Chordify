@@ -38,13 +38,7 @@ pub enum Request {
     
     /// Request to depart from the ring (sent to bootstrap node)
     /// Bootstrap will coordinate all pointer updates and key transfers
-    DepartRequest { departing_node: NodeInfo },
-    
-    /// Command from bootstrap to transfer keys directly to another node
-    TransferKeysTo { target_addr: SocketAddr },
-    
-    /// Receive keys from another node (sent during key transfer)
-    ReceiveKeys { keys: Vec<(String, String)> },
+    DepartRequest { departing_node: NodeInfo }
 }
 
 /// Response messages sent between nodes
