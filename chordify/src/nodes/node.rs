@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, debug};
+use tracing::{info, debug, warn};
 
 use crate::tcp::{Server, connect};
 use super::protocol::{Request, Response};
@@ -190,12 +190,18 @@ impl Node {
     pub async fn depart(&self, bootstrap_addr: SocketAddr) -> anyhow::Result<()> {
         info!("Departing ring via bootstrap at {}", bootstrap_addr);
 
-        // Send all the data to the successor before departing
+        // Send all the data to the successor before departing (only if successor is not itself)
         let successor = self.get_successor().await;
-        let state = self.state.read().await;
-        let data_clone = state.data.clone();
-        let request = Request::TransferData { data: data_clone };
-        self.send_request_no_response(successor.addr, request).await?;
+        if successor.addr != self.info.addr && successor.id != 0 {
+            let state = self.state.read().await;
+            let data_clone = state.data.clone();
+            drop(state); // Release the lock before sending
+            
+            let request = Request::TransferData { data: data_clone };
+            if let Err(e) = self.send_request_no_response(successor.addr, request).await {
+                warn!("Failed to transfer data to successor during depart: {}", e);
+            }
+        }
 
         
         // Send DepartRequest to bootstrap

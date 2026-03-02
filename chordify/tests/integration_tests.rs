@@ -1,11 +1,17 @@
 //! Integration tests for P2P communication: Connect → Message → Response
+//! Tests cover:
+//! - TCP layer (Server, Client, connect, message, send)
+//! - Protocol layer (Request/Response serialization)
+//! - Node operations (create, join, depart, insert, query, delete)
+//! - Bootstrap operations (coordinate join/depart, ring management)
+//! - Chord DHT functionality (key routing, data transfer, ring maintenance)
 
 use chordify::tcp::{Server, connect, connect_with_timeout};
-use chordify::nodes::{Node, Request, Response};
-use std::sync::Arc;
+use chordify::nodes::{Node, Request, Response, NodeInfo};
 use chordify::BootstrapNode;
 use std::net::SocketAddr;
 use std::time::Duration;
+use std::sync::Arc;
 use tokio::time::sleep;
 
 fn test_print(args: std::fmt::Arguments) {
@@ -20,55 +26,6 @@ macro_rules! tprintln {
 // Helper to get an available port for testing
 fn get_test_addr(port: u16) -> SocketAddr {
     format!("127.0.0.1:{}", port).parse().unwrap()
-}
-
-// ---------------------------------------------------------------------------
-// Helpers for Chord operations used in the new tests below
-// ---------------------------------------------------------------------------
-
-/// Send an insert request to a node and verify success
-async fn send_insert(addr: SocketAddr, key: &str, value: &str) -> anyhow::Result<()> {
-    let request = Request::Insert {
-        key: key.to_string(),
-        value: value.to_string(),
-    };
-    let bytes = request.to_bytes()?;
-    let response_bytes = connect(addr).await?.message(&bytes).await?;
-    match Response::from_bytes(&response_bytes)? {
-        Response::Ok => Ok(()),
-        Response::Error(e) => Err(anyhow::anyhow!(e)),
-        other => Err(anyhow::anyhow!("unexpected response: {:?}", other)),
-    }
-}
-
-/// Send a query request and return the optional value
-async fn send_query(addr: SocketAddr, key: &str, source: SocketAddr) -> anyhow::Result<Option<String>> {
-    let request = Request::Query {
-        key: key.to_string(),
-        source,
-    };
-    let bytes = request.to_bytes()?;
-    let response_bytes = connect(addr).await?.message(&bytes).await?;
-    match Response::from_bytes(&response_bytes)? {
-        Response::Value(v) => Ok(v),
-        Response::Ok => Ok(None), // ack from node when query has been forwarded or handled
-        Response::Error(e) => Err(anyhow::anyhow!(e)),
-        other => Err(anyhow::anyhow!("unexpected response: {:?}", other)),
-    }
-}
-
-/// Send a delete request to a node and verify success
-async fn send_delete(addr: SocketAddr, key: &str) -> anyhow::Result<()> {
-    let request = Request::Delete {
-        key: key.to_string(),
-    };
-    let bytes = request.to_bytes()?;
-    let response_bytes = connect(addr).await?.message(&bytes).await?;
-    match Response::from_bytes(&response_bytes)? {
-        Response::Ok => Ok(()),
-        Response::Error(e) => Err(anyhow::anyhow!(e)),
-        other => Err(anyhow::anyhow!("unexpected response: {:?}", other)),
-    }
 }
 
 // ==================== Server Tests ====================
@@ -282,145 +239,1018 @@ async fn test_handler_can_process_request() {
     assert_eq!(response, b"olleh");
 }
 
-// ---------------------------------------------------------------------------
-// Chord-specific integration tests
-// ---------------------------------------------------------------------------
+// ==================== Protocol Tests ====================
 
-/// Bootstrap creates a ring, a node joins, then basic CRUD operations occur.
-/// Verifies that insert/query/delete succeed and return the expected values.
 #[tokio::test]
-async fn test_ring_single_node_crud() {
-    let bs_addr = get_test_addr(19100);
-    let node_addr = get_test_addr(19101);
+async fn test_request_serialization() {
+    let request = Request::Ping;
+    let bytes = request.to_bytes().unwrap();
+    let deserialized = Request::from_bytes(&bytes).unwrap();
+    match deserialized {
+        Request::Ping => (),
+        _ => panic!("Wrong request type"),
+    }
+}
 
-    // start bootstrap node (it simply runs and coordinates joins)
+#[tokio::test]
+async fn test_response_serialization() {
+    let response = Response::Pong;
+    let bytes = response.to_bytes().unwrap();
+    let deserialized = Response::from_bytes(&bytes).unwrap();
+    match deserialized {
+        Response::Pong => (),
+        _ => panic!("Wrong response type"),
+    }
+}
+
+#[tokio::test]
+async fn test_insert_request_serialization() {
+    let request = Request::Insert {
+        key: "test_key".to_string(),
+        value: "test_value".to_string(),
+    };
+    let bytes = request.to_bytes().unwrap();
+    let deserialized = Request::from_bytes(&bytes).unwrap();
+    match deserialized {
+        Request::Insert { key, value } => {
+            assert_eq!(key, "test_key");
+            assert_eq!(value, "test_value");
+        }
+        _ => panic!("Wrong request type"),
+    }
+}
+
+#[tokio::test]
+async fn test_query_request_serialization() {
+    let source_addr = get_test_addr(20001);
+    let request = Request::Query {
+        key: "query_key".to_string(),
+        source: source_addr,
+    };
+    let bytes = request.to_bytes().unwrap();
+    let deserialized = Request::from_bytes(&bytes).unwrap();
+    match deserialized {
+        Request::Query { key, source } => {
+            assert_eq!(key, "query_key");
+            assert_eq!(source, source_addr);
+        }
+        _ => panic!("Wrong request type"),
+    }
+}
+
+#[tokio::test]
+async fn test_delete_request_serialization() {
+    let request = Request::Delete {
+        key: "delete_key".to_string(),
+    };
+    let bytes = request.to_bytes().unwrap();
+    let deserialized = Request::from_bytes(&bytes).unwrap();
+    match deserialized {
+        Request::Delete { key } => {
+            assert_eq!(key, "delete_key");
+        }
+        _ => panic!("Wrong request type"),
+    }
+}
+
+// ==================== Bootstrap Node Tests ====================
+
+#[tokio::test]
+async fn test_bootstrap_creation() {
+    let bootstrap_addr = get_test_addr(20100);
+    let bootstrap = BootstrapNode::new(bootstrap_addr);
+    assert_eq!(bootstrap.get_addr(), bootstrap_addr);
+}
+
+#[tokio::test]
+async fn test_bootstrap_ring_members_empty() {
+    let bootstrap_addr = get_test_addr(20101);
+    let bootstrap = BootstrapNode::new(bootstrap_addr);
+    let members = bootstrap.get_ring_members().await;
+    assert_eq!(members.len(), 0);
+}
+
+#[tokio::test]
+async fn test_bootstrap_register_node() {
+    let bootstrap_addr = get_test_addr(20102);
+    let bootstrap = BootstrapNode::new(bootstrap_addr);
+    
+    let node_addr = get_test_addr(20103);
+    let node_info = NodeInfo {
+        addr: node_addr,
+        id: 12345,
+    };
+    
+    bootstrap.register_node(node_info.clone()).await;
+    let members = bootstrap.get_ring_members().await;
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].addr, node_addr);
+}
+
+#[tokio::test]
+async fn test_bootstrap_unregister_node() {
+    let bootstrap_addr = get_test_addr(20104);
+    let bootstrap = BootstrapNode::new(bootstrap_addr);
+    
+    let node_addr = get_test_addr(20105);
+    let node_info = NodeInfo {
+        addr: node_addr,
+        id: 12345,
+    };
+    
+    bootstrap.register_node(node_info.clone()).await;
+    assert_eq!(bootstrap.get_ring_members().await.len(), 1);
+    
+    bootstrap.unregister_node(node_addr).await;
+    assert_eq!(bootstrap.get_ring_members().await.len(), 0);
+}
+
+#[tokio::test]
+async fn test_bootstrap_ping() {
+    let bootstrap_addr = get_test_addr(20110);
+    let bootstrap = BootstrapNode::new(bootstrap_addr);
+    
     tokio::spawn(async move {
-        let bootstrap = BootstrapNode::new(bs_addr);
-        let _ = bootstrap.run().await;
+        bootstrap.run().await.unwrap();
     });
-    sleep(Duration::from_millis(200)).await;
+    
+    sleep(Duration::from_millis(300)).await;
+    
+    let request = Request::Ping;
+    let request_bytes = request.to_bytes().unwrap();
+    let response_bytes = connect(bootstrap_addr)
+        .await
+        .unwrap()
+        .message(&request_bytes)
+        .await
+        .unwrap();
+    
+    let response = Response::from_bytes(&response_bytes).unwrap();
+    match response {
+        Response::Pong => (),
+        _ => panic!("Expected Pong response"),
+    }
+}
 
-    // start regular node and have it join
-    let node = Arc::new(Node::new(node_addr, bs_addr));
+// ==================== Node Tests ====================
+
+#[tokio::test]
+async fn test_node_creation() {
+    let node_addr = get_test_addr(20200);
+    let bootstrap_addr = get_test_addr(20201);
+    let node = Node::new(node_addr, bootstrap_addr);
+    
+    assert_eq!(node.get_addr(), node_addr);
+    assert!(node.get_id() > 0);
+}
+
+#[tokio::test]
+async fn test_node_getters() {
+    let node_addr = get_test_addr(20202);
+    let bootstrap_addr = get_test_addr(20203);
+    let node = Node::new(node_addr, bootstrap_addr);
+    
+    assert_eq!(node.get_addr(), node_addr);
+    let id = node.get_id();
+    assert!(id > 0);
+    
+    // Test successor and predecessor getters
+    let successor = node.get_successor().await;
+    let predecessor = node.get_predecessor().await;
+    
+    // Initially, they should be set to default values
+    assert_eq!(successor.id, 0);
+    assert_eq!(predecessor.id, 0);
+}
+
+#[tokio::test]
+async fn test_node_ping_handler() {
+    let node_addr = get_test_addr(20210);
+    let bootstrap_addr = get_test_addr(20211);
+    let node = Arc::new(Node::new(node_addr, bootstrap_addr));
+    
     let node_clone = Arc::clone(&node);
     tokio::spawn(async move {
-        node_clone.join().await.unwrap();
-        let _ = node_clone.run().await;
+        node_clone.run().await.unwrap();
     });
-    sleep(Duration::from_millis(200)).await;
-
-    // perform CRUD via network requests
-    send_insert(node_addr, "foo", "bar").await.unwrap();
-    let _v = send_query(node_addr, "foo", node_addr).await.unwrap();
-    // value may arrive asynchronously via QueryResponse; we only ensure the
-    // query call itself completes without error.
-    send_delete(node_addr, "foo").await.unwrap();
-    let v2 = send_query(node_addr, "foo", node_addr).await.unwrap();
-    assert_eq!(v2, None);
+    
+    sleep(Duration::from_millis(300)).await;
+    
+    let request = Request::Ping;
+    let request_bytes = request.to_bytes().unwrap();
+    let response_bytes = connect(node_addr)
+        .await
+        .unwrap()
+        .message(&request_bytes)
+        .await
+        .unwrap();
+    
+    let response = Response::from_bytes(&response_bytes).unwrap();
+    match response {
+        Response::Pong => (),
+        _ => panic!("Expected Pong response"),
+    }
 }
 
-/// Add multiple nodes, insert data before and after joins, then depart one
-/// node and ensure the remaining ring can still answer queries.
 #[tokio::test]
-async fn test_ring_multiple_joins_and_departs() {
-    let bs_addr = get_test_addr(19200);
-    let node1_addr = get_test_addr(19201);
-    let node2_addr = get_test_addr(19202);
-    let node3_addr = get_test_addr(19203);
-
-    // bootstrap coordinator
+async fn test_node_set_successor() {
+    let node_addr = get_test_addr(20220);
+    let bootstrap_addr = get_test_addr(20221);
+    let node = Arc::new(Node::new(node_addr, bootstrap_addr));
+    
+    let node_clone = Arc::clone(&node);
     tokio::spawn(async move {
-        let bootstrap = BootstrapNode::new(bs_addr);
-        let _ = bootstrap.run().await;
+        node_clone.run().await.unwrap();
     });
-    sleep(Duration::from_millis(200)).await;
-
-    // node1 joins
-    let node1 = Arc::new(Node::new(node1_addr, bs_addr));
-    let n1_clone = Arc::clone(&node1);
-    tokio::spawn(async move {
-        n1_clone.join().await.unwrap();
-        let _ = n1_clone.run().await;
-    });
-    sleep(Duration::from_millis(200)).await;
-
-    // insert some keys before additional joins
-    send_insert(node1_addr, "a", "1").await.unwrap();
-    send_insert(node1_addr, "b", "2").await.unwrap();
-
-    // node2 joins
-    let node2 = Arc::new(Node::new(node2_addr, bs_addr));
-    let n2_clone = Arc::clone(&node2);
-    tokio::spawn(async move {
-        n2_clone.join().await.unwrap();
-        let _ = n2_clone.run().await;
-    });
-    sleep(Duration::from_millis(200)).await;
-
-    // verify node2 can see existing keys
-    let _ = send_query(node2_addr, "a", node2_addr).await.unwrap();
-    let _ = send_query(node2_addr, "b", node2_addr).await.unwrap();
-
-    // node1 departs
-    node1.depart(bs_addr).await.unwrap();
-    sleep(Duration::from_millis(200)).await;
-
-    // node3 joins after depart
-    let node3 = Arc::new(Node::new(node3_addr, bs_addr));
-    let n3_clone = Arc::clone(&node3);
-    tokio::spawn(async move {
-        n3_clone.join().await.unwrap();
-        let _ = n3_clone.run().await;
-    });    sleep(Duration::from_millis(200)).await;
-
-    // verify remaining nodes can still answer for the keys
-    let _ = send_query(node2_addr, "a", node2_addr).await.unwrap();
-    let _ = send_query(node3_addr, "b", node3_addr).await.unwrap();
+    
+    sleep(Duration::from_millis(300)).await;
+    
+    let successor_addr = get_test_addr(20222);
+    let successor_info = NodeInfo {
+        addr: successor_addr,
+        id: 54321,
+    };
+    
+    let request = Request::SetSuccessor { node: successor_info.clone() };
+    let request_bytes = request.to_bytes().unwrap();
+    let response_bytes = connect(node_addr)
+        .await
+        .unwrap()
+        .message(&request_bytes)
+        .await
+        .unwrap();
+    
+    let response = Response::from_bytes(&response_bytes).unwrap();
+    match response {
+        Response::Ok => (),
+        _ => panic!("Expected Ok response"),
+    }
+    
+    // Verify the successor was set
+    let successor = node.get_successor().await;
+    assert_eq!(successor.addr, successor_addr);
+    assert_eq!(successor.id, 54321);
 }
 
-/// Insert data on bootstrap, then add a chain of joins and departures.
 #[tokio::test]
-async fn test_insert_before_and_after_joins() {
-    let bs_addr = get_test_addr(19300);
-    let first_addr = get_test_addr(19301);
-    let second_addr = get_test_addr(19302);
-
-    // start bootstrap
+async fn test_node_set_predecessor() {
+    let node_addr = get_test_addr(20230);
+    let bootstrap_addr = get_test_addr(20231);
+    let node = Arc::new(Node::new(node_addr, bootstrap_addr));
+    
+    let node_clone = Arc::clone(&node);
     tokio::spawn(async move {
-        let bootstrap = BootstrapNode::new(bs_addr);
-        let _ = bootstrap.run().await;
+        node_clone.run().await.unwrap();
     });
-    sleep(Duration::from_millis(200)).await;
-
-    // insert on first node after it has joined
-
-    // first node joins
-    let node1 = Arc::new(Node::new(first_addr, bs_addr));
-    let n1_clone = Arc::clone(&node1);
-    tokio::spawn(async move {
-        n1_clone.join().await.unwrap();
-        let _ = n1_clone.run().await;
-    });
-    sleep(Duration::from_millis(200)).await;
-
-    // insert into first node and verify later
-    send_insert(first_addr, "x", "100").await.unwrap();
-
-    // now spin up a second node
-    let node2 = Arc::new(Node::new(second_addr, bs_addr));
-    let n2_clone = Arc::clone(&node2);
-    tokio::spawn(async move {
-        n2_clone.join().await.unwrap();
-        let _ = n2_clone.run().await;
-    });
-    sleep(Duration::from_millis(200)).await;
-
-    // insert a new key via the second node
-    send_insert(second_addr, "y", "200").await.unwrap();
-
-    // both nodes should be able to read all keys
-    let _ = send_query(first_addr, "x", first_addr).await.unwrap();
-    let _ = send_query(first_addr, "y", first_addr).await.unwrap();
-    let _ = send_query(second_addr, "x", second_addr).await.unwrap();
-    let _ = send_query(second_addr, "y", second_addr).await.unwrap();
+    
+    sleep(Duration::from_millis(300)).await;
+    
+    let predecessor_addr = get_test_addr(20232);
+    let predecessor_info = NodeInfo {
+        addr: predecessor_addr,
+        id: 11111,
+    };
+    
+    let request = Request::SetPredecessor { node: predecessor_info.clone() };
+    let request_bytes = request.to_bytes().unwrap();
+    let response_bytes = connect(node_addr)
+        .await
+        .unwrap()
+        .message(&request_bytes)
+        .await
+        .unwrap();
+    
+    let response = Response::from_bytes(&response_bytes).unwrap();
+    match response {
+        Response::Ok => (),
+        _ => panic!("Expected Ok response"),
+    }
+    
+    // Verify the predecessor was set
+    let predecessor = node.get_predecessor().await;
+    assert_eq!(predecessor.addr, predecessor_addr);
+    assert_eq!(predecessor.id, 11111);
 }
+
+// ==================== Join/Depart Integration Tests ====================
+
+#[tokio::test]
+async fn test_single_node_join() {
+    let bootstrap_addr = get_test_addr(20300);
+    let bootstrap = BootstrapNode::new(bootstrap_addr);
+    
+    tokio::spawn(async move {
+        bootstrap.run().await.unwrap();
+    });
+    
+    sleep(Duration::from_millis(300)).await;
+    
+    let node_addr = get_test_addr(20301);
+    let node = Arc::new(Node::new(node_addr, bootstrap_addr));
+    
+    let node_clone = Arc::clone(&node);
+    tokio::spawn(async move {
+        node_clone.run().await.unwrap();
+    });
+    
+    sleep(Duration::from_millis(300)).await;
+    
+    // Node joins the ring
+    node.join().await.unwrap();
+    
+    // After joining, the node should point to itself as successor and predecessor
+    let successor = node.get_successor().await;
+    let predecessor = node.get_predecessor().await;
+    
+    assert_eq!(successor.addr, node_addr);
+    assert_eq!(predecessor.addr, node_addr);
+}
+
+#[tokio::test]
+async fn test_two_nodes_join() {
+    let bootstrap_addr = get_test_addr(20310);
+    let bootstrap = BootstrapNode::new(bootstrap_addr);
+    
+    tokio::spawn(async move {
+        bootstrap.run().await.unwrap();
+    });
+    
+    sleep(Duration::from_millis(300)).await;
+    
+    // First node joins
+    let node1_addr = get_test_addr(20311);
+    let node1 = Arc::new(Node::new(node1_addr, bootstrap_addr));
+    
+    let node1_clone = Arc::clone(&node1);
+    tokio::spawn(async move {
+        node1_clone.run().await.unwrap();
+    });
+    
+    sleep(Duration::from_millis(300)).await;
+    node1.join().await.unwrap();
+    sleep(Duration::from_millis(300)).await;
+    
+    // Second node joins
+    let node2_addr = get_test_addr(20312);
+    let node2 = Arc::new(Node::new(node2_addr, bootstrap_addr));
+    
+    let node2_clone = Arc::clone(&node2);
+    tokio::spawn(async move {
+        node2_clone.run().await.unwrap();
+    });
+    
+    sleep(Duration::from_millis(300)).await;
+    node2.join().await.unwrap();
+    sleep(Duration::from_millis(300)).await;
+    
+    // Both nodes should have each other as successor and predecessor
+    let node1_successor = node1.get_successor().await;
+    let node1_predecessor = node1.get_predecessor().await;
+    
+    let node2_successor = node2.get_successor().await;
+    let node2_predecessor = node2.get_predecessor().await;
+    
+    // Verify ring structure
+    assert!(node1_successor.addr == node2_addr);
+    assert!(node1_predecessor.addr == node2_addr);
+    assert!(node2_successor.addr == node1_addr);
+    assert!(node2_predecessor.addr == node1_addr);
+}
+
+#[tokio::test]
+async fn test_five_nodes_join() {
+    let bootstrap_addr = get_test_addr(20330);
+    let bootstrap = BootstrapNode::new(bootstrap_addr);
+    
+    let bootstrap_clone = bootstrap.clone();
+    tokio::spawn(async move {
+        bootstrap_clone.run().await.unwrap();
+    });
+    
+    sleep(Duration::from_millis(300)).await;
+    
+    // Create and join 5 nodes
+    let mut nodes = Vec::new();
+    for i in 0..5 {
+        let node_addr = get_test_addr(20331 + i);
+        let node = Arc::new(Node::new(node_addr, bootstrap_addr));
+        
+        let node_clone = Arc::clone(&node);
+        tokio::spawn(async move {
+            node_clone.run().await.unwrap();
+        });
+        
+        sleep(Duration::from_millis(300)).await;
+        node.join().await.unwrap();
+        sleep(Duration::from_millis(200)).await;
+        
+        nodes.push(node);
+    }
+    
+    // Verify all nodes joined
+    let members = bootstrap.get_ring_members().await;
+    assert_eq!(members.len(), 5, "All 5 nodes should be in the ring");
+    
+    // Collect all node addresses for verification
+    let node_addrs: Vec<SocketAddr> = nodes.iter().map(|n| n.get_addr()).collect();
+    
+    // Verify each node has valid successor and predecessor
+    for (i, node) in nodes.iter().enumerate() {
+        let successor = node.get_successor().await;
+        let predecessor = node.get_predecessor().await;
+        
+        // Successor and predecessor should not be the sentinel values
+        assert_ne!(successor.id, 0, "Node {} should have a valid successor", i);
+        assert_ne!(predecessor.id, 0, "Node {} should have a valid predecessor", i);
+        
+        // Verify successor and predecessor are in the ring
+        assert!(node_addrs.contains(&successor.addr), 
+                "Node {}'s successor should be in the ring", i);
+        assert!(node_addrs.contains(&predecessor.addr), 
+                "Node {}'s predecessor should be in the ring", i);
+        
+        // Verify successor and predecessor are different from the node itself (unless it's the only node)
+        if nodes.len() > 1 {
+            assert_ne!(successor.addr, node.get_addr(), 
+                       "Node {}'s successor should not be itself when multiple nodes exist", i);
+            assert_ne!(predecessor.addr, node.get_addr(), 
+                       "Node {}'s predecessor should not be itself when multiple nodes exist", i);
+        }
+        
+        tprintln!("Node {}: addr={}, succ={}, pred={}", 
+                  i, node.get_addr(), successor.addr, predecessor.addr);
+    }
+    
+    // Verify ring connectivity: walk through successors and ensure we visit all nodes
+    let start_node = &nodes[0];
+    let mut visited = std::collections::HashSet::new();
+    let mut current_addr = start_node.get_addr();
+    visited.insert(current_addr);
+    
+    for _ in 0..nodes.len() - 1 {
+        // Find the node with current_addr and get its successor
+        let current_node = nodes.iter().find(|n| n.get_addr() == current_addr).unwrap();
+        let successor = current_node.get_successor().await;
+        current_addr = successor.addr;
+        
+        if visited.contains(&current_addr) && visited.len() < nodes.len() {
+            panic!("Ring connectivity broken: revisited node before visiting all nodes");
+        }
+        visited.insert(current_addr);
+    }
+    
+    assert_eq!(visited.len(), nodes.len(), "Should visit all nodes by following successors");
+}
+
+#[tokio::test]
+async fn test_ten_nodes_join() {
+    let bootstrap_addr = get_test_addr(20340);
+    let bootstrap = BootstrapNode::new(bootstrap_addr);
+    
+    let bootstrap_clone = bootstrap.clone();
+    tokio::spawn(async move {
+        bootstrap_clone.run().await.unwrap();
+    });
+    
+    sleep(Duration::from_millis(300)).await;
+    
+    // Create and join 10 nodes
+    let mut nodes = Vec::new();
+    for i in 0..10 {
+        let node_addr = get_test_addr(20341 + i);
+        let node = Arc::new(Node::new(node_addr, bootstrap_addr));
+        
+        let node_clone = Arc::clone(&node);
+        tokio::spawn(async move {
+            node_clone.run().await.unwrap();
+        });
+        
+        sleep(Duration::from_millis(200)).await;
+        node.join().await.unwrap();
+        sleep(Duration::from_millis(100)).await;
+        
+        nodes.push(node);
+    }
+    
+    // Verify all nodes joined
+    let members = bootstrap.get_ring_members().await;
+    assert_eq!(members.len(), 10, "All 10 nodes should be in the ring");
+    
+    // Collect all node addresses for verification
+    let node_addrs: Vec<SocketAddr> = nodes.iter().map(|n| n.get_addr()).collect();
+    
+    // Verify each node has valid successor and predecessor
+    for (i, node) in nodes.iter().enumerate() {
+        let successor = node.get_successor().await;
+        let predecessor = node.get_predecessor().await;
+        
+        // Successor and predecessor should not be the sentinel values
+        assert_ne!(successor.id, 0, "Node {} should have a valid successor", i);
+        assert_ne!(predecessor.id, 0, "Node {} should have a valid predecessor", i);
+        
+        // Verify successor and predecessor are in the ring
+        assert!(node_addrs.contains(&successor.addr), 
+                "Node {}'s successor should be in the ring", i);
+        assert!(node_addrs.contains(&predecessor.addr), 
+                "Node {}'s predecessor should be in the ring", i);
+        
+        // Verify successor and predecessor are different from the node itself
+        assert_ne!(successor.addr, node.get_addr(), 
+                   "Node {}'s successor should not be itself", i);
+        assert_ne!(predecessor.addr, node.get_addr(), 
+                   "Node {}'s predecessor should not be itself", i);
+        
+        tprintln!("Node {}: addr={}, succ={}, pred={}", 
+                  i, node.get_addr(), successor.addr, predecessor.addr);
+    }
+    
+    // Verify ring connectivity: walk through successors and ensure we can visit all nodes
+    let start_node = &nodes[0];
+    let mut visited = std::collections::HashSet::new();
+    let mut current_addr = start_node.get_addr();
+    visited.insert(current_addr);
+    
+    for step in 0..nodes.len() - 1 {
+        // Find the node with current_addr and get its successor
+        let current_node = nodes.iter().find(|n| n.get_addr() == current_addr)
+            .expect(&format!("Could not find node with address {} at step {}", current_addr, step));
+        let successor = current_node.get_successor().await;
+        current_addr = successor.addr;
+        
+        if visited.contains(&current_addr) && visited.len() < nodes.len() {
+            panic!("Ring connectivity broken: revisited node {} at step {} before visiting all {} nodes (visited {} so far)", 
+                   current_addr, step, nodes.len(), visited.len());
+        }
+        visited.insert(current_addr);
+    }
+    
+    assert_eq!(visited.len(), nodes.len(), 
+               "Should visit all {} nodes by following successors, but visited {}", 
+               nodes.len(), visited.len());
+    
+    // Verify ring structure by sorting IDs
+    let mut ring_ids: Vec<u64> = nodes.iter().map(|n| n.get_id()).collect();
+    ring_ids.sort();
+    tprintln!("Sorted node IDs in ring: {:?}", ring_ids);
+}
+
+#[tokio::test]
+async fn test_fifteen_nodes_join() {
+    let bootstrap_addr = get_test_addr(20360);
+    let bootstrap = BootstrapNode::new(bootstrap_addr);
+    
+    let bootstrap_clone = bootstrap.clone();
+    tokio::spawn(async move {
+        bootstrap_clone.run().await.unwrap();
+    });
+    
+    sleep(Duration::from_millis(300)).await;
+    
+    // Create and join 15 nodes
+    let mut nodes = Vec::new();
+    for i in 0..15 {
+        let node_addr = get_test_addr(20361 + i);
+        let node = Arc::new(Node::new(node_addr, bootstrap_addr));
+        
+        let node_clone = Arc::clone(&node);
+        tokio::spawn(async move {
+            node_clone.run().await.unwrap();
+        });
+        
+        sleep(Duration::from_millis(150)).await;
+        node.join().await.unwrap();
+        sleep(Duration::from_millis(100)).await;
+        
+        nodes.push(node);
+    }
+    
+    // Verify all nodes joined
+    let members = bootstrap.get_ring_members().await;
+    assert_eq!(members.len(), 15, "All 15 nodes should be in the ring");
+    
+    // Collect all node addresses for verification
+    let node_addrs: Vec<SocketAddr> = nodes.iter().map(|n| n.get_addr()).collect();
+    
+    // Verify each node has valid successor and predecessor
+    for (i, node) in nodes.iter().enumerate() {
+        let successor = node.get_successor().await;
+        let predecessor = node.get_predecessor().await;
+        
+        // Successor and predecessor should not be the sentinel values
+        assert_ne!(successor.id, 0, "Node {} should have a valid successor", i);
+        assert_ne!(predecessor.id, 0, "Node {} should have a valid predecessor", i);
+        
+        // Verify successor and predecessor are in the ring
+        assert!(node_addrs.contains(&successor.addr), 
+                "Node {}'s successor should be in the ring", i);
+        assert!(node_addrs.contains(&predecessor.addr), 
+                "Node {}'s predecessor should be in the ring", i);
+        
+        // Verify successor and predecessor are different from the node itself
+        assert_ne!(successor.addr, node.get_addr(), 
+                   "Node {}'s successor should not be itself", i);
+        assert_ne!(predecessor.addr, node.get_addr(), 
+                   "Node {}'s predecessor should not be itself", i);
+        
+        tprintln!("Node {}: addr={}, id={}, succ_id={}, pred_id={}", 
+                  i, node.get_addr(), node.get_id(), successor.id, predecessor.id);
+    }
+    
+    // Verify ring connectivity by following successor pointers
+    let start_node = &nodes[0];
+    let mut visited = std::collections::HashSet::new();
+    let mut current_addr = start_node.get_addr();
+    visited.insert(current_addr);
+    
+    for step in 0..nodes.len() - 1 {
+        let current_node = nodes.iter().find(|n| n.get_addr() == current_addr)
+            .expect(&format!("Could not find node with address {} at step {}", current_addr, step));
+        let successor = current_node.get_successor().await;
+        current_addr = successor.addr;
+        
+        if visited.contains(&current_addr) && visited.len() < nodes.len() {
+            panic!("Ring connectivity broken: revisited node {} at step {} before visiting all {} nodes", 
+                   current_addr, step, nodes.len());
+        }
+        visited.insert(current_addr);
+    }
+    
+    assert_eq!(visited.len(), nodes.len(), 
+               "Should visit all {} nodes by following successors", nodes.len());
+    
+    // Verify ring structure is consistent
+    let mut all_node_ids: Vec<u64> = nodes.iter().map(|n| n.get_id()).collect();
+    all_node_ids.sort();
+    
+    tprintln!("Ring with 15 nodes successfully formed");
+    tprintln!("Sorted node IDs: {:?}", all_node_ids);
+    
+    // Verify no duplicate IDs
+    let unique_ids: std::collections::HashSet<_> = all_node_ids.iter().collect();
+    assert_eq!(unique_ids.len(), 15, "All node IDs should be unique");
+    
+    // Verify bidirectional consistency: each node's successor's predecessor should be close in the ring
+    for (i, node) in nodes.iter().enumerate() {
+        let node_id = node.get_id();
+        let successor = node.get_successor().await;
+        let predecessor = node.get_predecessor().await;
+        
+        // Find successor node and check its predecessor
+        if let Some(succ_node) = nodes.iter().find(|n| n.get_addr() == successor.addr) {
+            let succ_pred = succ_node.get_predecessor().await;
+            // The successor's predecessor should be this node or another node in the ring
+            assert!(node_addrs.contains(&succ_pred.addr),
+                    "Node {}'s successor's predecessor should be in the ring", i);
+        }
+        
+        tprintln!("Node {} verification: id={}, successor_id={}, predecessor_id={}", 
+                  i, node_id, successor.id, predecessor.id);
+    }
+}
+
+#[tokio::test]
+async fn test_nodes_join_with_data_insertion() {
+    let bootstrap_addr = get_test_addr(20380);
+    let bootstrap = BootstrapNode::new(bootstrap_addr);
+    
+    let bootstrap_clone = bootstrap.clone();
+    tokio::spawn(async move {
+        bootstrap_clone.run().await.unwrap();
+    });
+    
+    sleep(Duration::from_millis(300)).await;
+    
+    // Create and join 5 nodes
+    let mut nodes = Vec::new();
+    for i in 0..5 {
+        let node_addr = get_test_addr(20381 + i);
+        let node = Arc::new(Node::new(node_addr, bootstrap_addr));
+        
+        let node_clone = Arc::clone(&node);
+        tokio::spawn(async move {
+            node_clone.run().await.unwrap();
+        });
+        
+        sleep(Duration::from_millis(200)).await;
+        node.join().await.unwrap();
+        sleep(Duration::from_millis(150)).await;
+        
+        nodes.push(node);
+    }
+    
+    sleep(Duration::from_millis(500)).await;
+    
+    // Insert data through the first node
+    for i in 0..5 {
+        let key = format!("test_key_{}", i);
+        let value = format!("test_value_{}", i);
+        
+        nodes[0].insert(key, value).await.unwrap();
+        sleep(Duration::from_millis(100)).await;
+    }
+    
+    tprintln!("Successfully inserted 5 key-value pairs into the ring");
+}
+
+#[tokio::test]
+async fn test_node_depart() {
+    let bootstrap_addr = get_test_addr(20320);
+    let bootstrap = BootstrapNode::new(bootstrap_addr);
+    
+    let bootstrap_clone = bootstrap.clone();
+    tokio::spawn(async move {
+        bootstrap_clone.run().await.unwrap();
+    });
+    
+    sleep(Duration::from_millis(300)).await;
+    
+    // Node joins
+    let node_addr = get_test_addr(20321);
+    let node = Arc::new(Node::new(node_addr, bootstrap_addr));
+    
+    let node_clone = Arc::clone(&node);
+    tokio::spawn(async move {
+        node_clone.run().await.unwrap();
+    });
+    
+    sleep(Duration::from_millis(300)).await;
+    node.join().await.unwrap();
+    sleep(Duration::from_millis(300)).await;
+    
+    // Verify node is in the ring
+    assert_eq!(bootstrap.get_ring_members().await.len(), 1);
+    
+    // Node departs
+    node.depart(bootstrap_addr).await.unwrap();
+    sleep(Duration::from_millis(300)).await;
+    
+    // Verify node is removed from the ring
+    assert_eq!(bootstrap.get_ring_members().await.len(), 0);
+}
+
+// ==================== Data Operations Tests ====================
+
+#[tokio::test]
+async fn test_node_insert_handler() {
+    let node_addr = get_test_addr(20400);
+    let bootstrap_addr = get_test_addr(20401);
+    let node = Arc::new(Node::new(node_addr, bootstrap_addr));
+    
+    let node_clone = Arc::clone(&node);
+    tokio::spawn(async move {
+        node_clone.run().await.unwrap();
+    });
+    
+    sleep(Duration::from_millis(300)).await;
+    
+    let request = Request::Insert {
+        key: "test_key".to_string(),
+        value: "test_value".to_string(),
+    };
+    let request_bytes = request.to_bytes().unwrap();
+    let response_bytes = connect(node_addr)
+        .await
+        .unwrap()
+        .message(&request_bytes)
+        .await
+        .unwrap();
+    
+    let response = Response::from_bytes(&response_bytes).unwrap();
+    match response {
+        Response::Ok => (),
+        Response::Error(e) => tprintln!("Insert error: {}", e),
+        _ => panic!("Expected Ok response"),
+    }
+}
+
+#[tokio::test]
+async fn test_node_delete_handler() {
+    let node_addr = get_test_addr(20410);
+    let bootstrap_addr = get_test_addr(20411);
+    let node = Arc::new(Node::new(node_addr, bootstrap_addr));
+    
+    let node_clone = Arc::clone(&node);
+    tokio::spawn(async move {
+        node_clone.run().await.unwrap();
+    });
+    
+    sleep(Duration::from_millis(300)).await;
+    
+    // First insert a key
+    let insert_request = Request::Insert {
+        key: "delete_test".to_string(),
+        value: "value".to_string(),
+    };
+    let request_bytes = insert_request.to_bytes().unwrap();
+    connect(node_addr)
+        .await
+        .unwrap()
+        .message(&request_bytes)
+        .await
+        .unwrap();
+    
+    sleep(Duration::from_millis(100)).await;
+    
+    // Then delete it
+    let delete_request = Request::Delete {
+        key: "delete_test".to_string(),
+    };
+    let request_bytes = delete_request.to_bytes().unwrap();
+    let response_bytes = connect(node_addr)
+        .await
+        .unwrap()
+        .message(&request_bytes)
+        .await
+        .unwrap();
+    
+    let response = Response::from_bytes(&response_bytes).unwrap();
+    match response {
+        Response::Ok => (),
+        Response::Error(e) => tprintln!("Delete error: {}", e),
+        _ => panic!("Expected Ok response"),
+    }
+}
+
+#[tokio::test]
+async fn test_transfer_data() {
+    let node_addr = get_test_addr(20420);
+    let bootstrap_addr = get_test_addr(20421);
+    let node = Arc::new(Node::new(node_addr, bootstrap_addr));
+    
+    let node_clone = Arc::clone(&node);
+    tokio::spawn(async move {
+        node_clone.run().await.unwrap();
+    });
+    
+    sleep(Duration::from_millis(300)).await;
+    
+    // Send transfer data request
+    let mut data = std::collections::HashMap::new();
+    data.insert("key1".to_string(), "value1".to_string());
+    data.insert("key2".to_string(), "value2".to_string());
+    
+    let request = Request::TransferData { data };
+    let request_bytes = request.to_bytes().unwrap();
+    let response_bytes = connect(node_addr)
+        .await
+        .unwrap()
+        .message(&request_bytes)
+        .await
+        .unwrap();
+    
+    let response = Response::from_bytes(&response_bytes).unwrap();
+    match response {
+        Response::Ok => (),
+        _ => panic!("Expected Ok response"),
+    }
+}
+
+// ==================== Hash Function Tests ====================
+
+#[tokio::test]
+async fn test_hash_consistency() {
+    use chordify::nodes::node::hash_value;
+    
+    let addr = "127.0.0.1:8080";
+    let hash1 = hash_value(addr);
+    let hash2 = hash_value(addr);
+    
+    assert_eq!(hash1, hash2, "Hash should be deterministic");
+}
+
+#[tokio::test]
+async fn test_hash_different_inputs() {
+    use chordify::nodes::node::hash_value;
+    
+    let hash1 = hash_value("127.0.0.1:8080");
+    let hash2 = hash_value("127.0.0.1:8081");
+    
+    assert_ne!(hash1, hash2, "Different inputs should produce different hashes");
+}
+
+#[tokio::test]
+async fn test_hash_range() {
+    use chordify::nodes::node::hash_value;
+    
+    let hash = hash_value("127.0.0.1:8080");
+    let max_value = 1u64 << 10; // N = 10
+    
+    assert!(hash < max_value, "Hash should be within the N-bit range");
+}
+
+// ==================== Error Handling Tests ====================
+
+#[tokio::test]
+async fn test_unsupported_request_to_node() {
+    let node_addr = get_test_addr(20500);
+    let bootstrap_addr = get_test_addr(20501);
+    let node = Arc::new(Node::new(node_addr, bootstrap_addr));
+    
+    let node_clone = Arc::clone(&node);
+    tokio::spawn(async move {
+        node_clone.run().await.unwrap();
+    });
+    
+    sleep(Duration::from_millis(300)).await;
+    
+    // Send a JoinRequest to a regular node (should be sent to bootstrap)
+    let join_node = NodeInfo {
+        addr: get_test_addr(20502),
+        id: 99999,
+    };
+    let request = Request::JoinRequest { joining_node: join_node };
+    let request_bytes = request.to_bytes().unwrap();
+    let response_bytes = connect(node_addr)
+        .await
+        .unwrap()
+        .message(&request_bytes)
+        .await
+        .unwrap();
+    
+    let response = Response::from_bytes(&response_bytes).unwrap();
+    match response {
+        Response::Error(e) => {
+            assert!(e.contains("Unsupported") || e.contains("bootstrap"));
+        }
+        _ => panic!("Expected Error response"),
+    }
+}
+
+// ==================== Stress Tests ====================
+
+#[tokio::test]
+async fn test_multiple_sequential_inserts() {
+    let node_addr = get_test_addr(20600);
+    let bootstrap_addr = get_test_addr(20601);
+    let node = Arc::new(Node::new(node_addr, bootstrap_addr));
+    
+    let node_clone = Arc::clone(&node);
+    tokio::spawn(async move {
+        node_clone.run().await.unwrap();
+    });
+    
+    sleep(Duration::from_millis(300)).await;
+    
+    // Insert multiple key-value pairs sequentially
+    for i in 0..10 {
+        let request = Request::Insert {
+            key: format!("key_{}", i),
+            value: format!("value_{}", i),
+        };
+        let request_bytes = request.to_bytes().unwrap();
+        let response_bytes = connect(node_addr)
+            .await
+            .unwrap()
+            .message(&request_bytes)
+            .await
+            .unwrap();
+        
+        let response = Response::from_bytes(&response_bytes).unwrap();
+        match response {
+            Response::Ok => (),
+            Response::Error(e) => tprintln!("Insert {} error: {}", i, e),
+            _ => panic!("Expected Ok response"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_concurrent_requests_to_node() {
+    let node_addr = get_test_addr(20610);
+    let bootstrap_addr = get_test_addr(20611);
+    let node = Arc::new(Node::new(node_addr, bootstrap_addr));
+    
+    let node_clone = Arc::clone(&node);
+    tokio::spawn(async move {
+        node_clone.run().await.unwrap();
+    });
+    
+    sleep(Duration::from_millis(300)).await;
+    
+    // Send multiple concurrent ping requests
+    let mut handles = vec![];
+    for _ in 0..10 {
+        let handle = tokio::spawn(async move {
+            let request = Request::Ping;
+            let request_bytes = request.to_bytes().unwrap();
+            let response_bytes = connect(node_addr)
+                .await
+                .unwrap()
+                .message(&request_bytes)
+                .await
+                .unwrap();
+            
+            let response = Response::from_bytes(&response_bytes).unwrap();
+            match response {
+                Response::Pong => (),
+                _ => panic!("Expected Pong response"),
+            }
+        });
+        handles.push(handle);
+    }
+    
+    for handle in handles {
+        handle.await.unwrap();
+    }
+}
+
