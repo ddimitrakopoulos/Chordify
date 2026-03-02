@@ -187,15 +187,52 @@ impl Node {
     /// 
     /// The node only contacts the bootstrap, which coordinates all pointer 
     /// updates and key transfers.
+    // pub async fn depart(&self, bootstrap_addr: SocketAddr) -> anyhow::Result<()> {
+    //     info!("Departing ring via bootstrap at {}", bootstrap_addr);
+
+    //     // Send all the data to the successor before departing
+    //     let successor = self.get_successor().await;
+    //     let state = self.state.read().await;
+    //     let data_clone = state.data.clone();
+    //     let request = Request::TransferData { data: data_clone };
+    //     self.send_request_no_response(successor.addr, request).await?;
+
+        
+    //     // Send DepartRequest to bootstrap
+    //     let request = Request::DepartRequest { departing_node: self.info.clone() };
+    //     let response = self.send_request(bootstrap_addr, request).await?;
+        
+    //     match response {
+    //         Response::DepartSuccess => {
+    //             // Clear local state
+    //             let mut state = self.state.write().await;
+    //             state.successor = NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: 0 };
+    //             state.predecessor = NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: 0 };
+    //             state.data.clear();
+                
+    //             info!("Departed ring via bootstrap");
+    //             Ok(())
+    //         }
+    //         Response::Error(e) => Err(anyhow::anyhow!("Depart failed: {}", e)),
+    //         _ => Err(anyhow::anyhow!("Unexpected response from bootstrap")),
+    //     }
+    // }
+
     pub async fn depart(&self, bootstrap_addr: SocketAddr) -> anyhow::Result<()> {
         info!("Departing ring via bootstrap at {}", bootstrap_addr);
 
-        // Send all the data to the successor before departing
+        // Send all the data to the successor before departing (only if successor is not itself)
         let successor = self.get_successor().await;
-        let state = self.state.read().await;
-        let data_clone = state.data.clone();
-        let request = Request::TransferData { data: data_clone };
-        self.send_request_no_response(successor.addr, request).await?;
+        if successor.addr != self.info.addr && successor.id != 0 {
+            let state = self.state.read().await;
+            let data_clone = state.data.clone();
+            drop(state); // Release the lock before sending
+            
+            let request = Request::TransferData { data: data_clone };
+            if let Err(e) = self.send_request_no_response(successor.addr, request).await {
+                //warn!("Failed to transfer data to successor during depart: {}", e);
+            }
+        }
 
         
         // Send DepartRequest to bootstrap
