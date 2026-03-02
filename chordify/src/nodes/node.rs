@@ -109,15 +109,13 @@ impl Node {
     }
 
     /// Check if this node is responsible for a given key ID
-    pub async fn is_responsible(&self, key_id: &String) -> bool {
+    pub async fn is_responsible(&self, key_id: &String, predecessor_id: u64) -> bool {
         let key_id_hash = hash_value(key_id);
         // We read the predecessor under a lock to ensure we have a consistent view of the ring
         // state while checking responsibility. We await until we can acquire the lock.
-        let predecessor_guard = self.state.read().await.predecessor.clone();
-        
+
         // If there is no predecessor, then this node is the only node in the ring and is
         // responsible for all the keys
-        let predecessor_id = predecessor_guard.id;
 
         // If the ID of the predecessor is the same as this node's ID, then again this node is
         // responsible for all keys
@@ -280,7 +278,8 @@ impl Node {
         let prev_hash = hash_value(&prev.addr.to_string());
 
         (prev_hash < node_hash && key_hash > prev_hash && key_hash <= node_hash) ||
-        (prev_hash > node_hash && (key_hash > prev_hash || key_hash <= node_hash))
+        (prev_hash > node_hash && (key_hash > prev_hash || key_hash <= node_hash)) ||
+        (prev_hash == node_hash) // Only node in the ring
     }
 
 
@@ -418,14 +417,16 @@ impl Node {
             Request::SetPredecessorWithKeys { node } => {
                 let mut state_guard = self.state.write().await;
                 state_guard.predecessor = node.clone();
+                let predecessor_id = state_guard.predecessor.clone().id;
                 info!("Set predecessor to {} with keys", node.addr);
 
                 // Find the data that should be transferred to the new predecessor (keys for which the new predecessor is now responsible)
                 let mut new_data = HashMap::new();
                 for (key, value) in state_guard.data.iter() {
-                    if !self.is_responsible(key).await {
+                    if !self.is_responsible(key, predecessor_id).await {
                         new_data.insert(key.clone(), value.clone());
                     }
+
                 }
 
                 // Send the keys to the new predecessor
@@ -505,8 +506,8 @@ impl Node {
                 }
             },
             Request::TransferData { data } => {
+                let mut state = self.state.write().await;
                 for (key, value) in data {
-                    let mut state = self.state.write().await;
                     state.data.insert(key, value);
                 }
                 Response::Ok
