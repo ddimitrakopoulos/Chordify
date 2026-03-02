@@ -31,6 +31,8 @@ pub enum Request {
     GetSuccessor,
     /// Notify node that we might be its predecessor
     Notify { node: NodeInfo },
+    /// Set this node's predecessor and transfer keys later
+    SetPredecessorWithKeys { node: NodeInfo },
     /// Set this node's predecessor directly (sent by bootstrap during coordination)
     SetPredecessor { node: NodeInfo },
     /// Set this node's successor directly (sent by bootstrap during coordination)
@@ -86,7 +88,7 @@ pub enum Response {
     /// Join successful - includes the assigned successor and predecessor
     JoinSuccess { 
         successor: NodeInfo, 
-        predecessor: Option<NodeInfo>,
+        predecessor: NodeInfo,
     },
     
     /// Depart acknowledged - node can now shut down
