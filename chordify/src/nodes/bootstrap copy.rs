@@ -49,15 +49,6 @@ pub struct BootstrapNode {
     ring_members: Arc<RwLock<Vec<NodeInfo>>>,
 }
 
-impl Clone for BootstrapNode {
-    fn clone(&self) -> Self {
-        Self {
-            addr: self.addr,
-            ring_members: Arc::clone(&self.ring_members),
-        }
-    }
-}
-
 impl BootstrapNode {
     /// Create a new bootstrap node at the given address.
     /// This is the first node in the ring.
@@ -75,245 +66,15 @@ impl BootstrapNode {
 
     /// Start listening and handling requests
     pub async fn run(&self) -> anyhow::Result<()> {
-        let server = Server::bind(self.addr).await?;
+        let server = Server::bind(self.info.addr).await?;
         // wrap `self` in an Arc so the handler can keep a reference long-term
-        let bootstrap = Arc::new(self.clone());
+        let node = Arc::new(self.clone());
 
         server.listen(move |request_bytes, from| {
-            let bootstrap = Arc::clone(&bootstrap);
-            async move { bootstrap.handle_bootstrap_request(request_bytes, from).await }
+            let node = Arc::clone(&node);
+            async move { node.handle_request(request_bytes, from).await }
         }).await
     }
-
-
-    /// Handle an incoming request (bootstrap-aware version)
-    pub async fn handle_bootstrap_request(
-        &self,
-        request_bytes: Vec<u8>,
-        from: SocketAddr,
-    ) -> anyhow::Result<Vec<u8>> {
-        let request = Request::from_bytes(&request_bytes)?;
-        debug!("Bootstrap received {:?} from {}", request, from);
-        
-        let response = match request {
-            Request::Ping => Response::Pong,
-            
-            Request::FindSuccessor { addr: _ } => {
-                let state_guard = state.read().await;
-                if let Some(ref successor) = state_guard.successor {
-                    Response::Successor(successor.clone())
-                } else {
-                    Response::Successor(info.clone())
-                }
-            }
-            
-            Request::GetPredecessor => {
-                let state_guard = state.read().await;
-                Response::Predecessor(state_guard.predecessor.clone())
-            }
-            
-            Request::GetSuccessor => {
-                let state_guard = state.read().await;
-                Response::Successor(state_guard.successor.clone().unwrap_or(info.clone()))
-            }
-            
-            Request::SetPredecessor { node } => {
-                let mut state_guard = state.write().await;
-                state_guard.predecessor = Some(node.clone());
-                info!("Bootstrap: Set predecessor to {}", node.addr);
-                Response::Ok
-            }
-            
-            Request::SetSuccessor { node } => {
-                let mut state_guard = state.write().await;
-                state_guard.successor = Some(node.clone());
-                info!("Bootstrap: Set successor to {}", node.addr);
-                Response::Ok
-            }
-            
-            Request::Notify { node } => {
-                let mut state_guard = state.write().await;
-                if state_guard.predecessor.is_none() {
-                    state_guard.predecessor = Some(node.clone());
-                    info!("Bootstrap: Set predecessor to {}", node.addr);
-                } else if let Some(ref pred) = state_guard.predecessor {
-                    if node.addr != pred.addr {
-                        state_guard.predecessor = Some(node.clone());
-                        info!("Bootstrap: Updated predecessor to {}", node.addr);
-                    }
-                }
-                Response::Ok
-            }
-            
-            Request::JoinRequest { joining_node } => {
-                // Bootstrap-coordinated join
-                info!("Bootstrap: Processing JoinRequest from {}", joining_node.addr);
-                
-                // Find successor for the joining node
-                let state_guard = state.read().await;
-                let successor = state_guard.successor.clone().unwrap_or(info.clone());
-                let predecessor = state_guard.predecessor.clone();
-                drop(state_guard);
-                
-                // Update bootstrap's pointers
-                {
-                    let mut state_guard = state.write().await;
-                    
-                    // If bootstrap was alone, joining node becomes both successor and predecessor
-                    if state_guard.successor.as_ref().map(|s| s.addr) == Some(info.addr) {
-                        state_guard.successor = Some(joining_node.clone());
-                        state_guard.predecessor = Some(joining_node.clone());
-                    } else {
-                        // If joining node should be bootstrap's successor (bootstrap is its predecessor)
-                        if predecessor.as_ref().map(|p| p.addr) == Some(info.addr) ||
-                        state_guard.predecessor.is_none() {
-                            state_guard.predecessor = Some(joining_node.clone());
-                        }
-                    }
-                }
-                
-                // Register the node
-                {
-                    let mut members = ring_members.write().await;
-                    if !members.iter().any(|n| n.addr == joining_node.addr) {
-                        members.push(joining_node.clone());
-                        info!("Bootstrap: Registered joining node {} ({} total)", joining_node.addr, members.len());
-                    }
-                }
-                
-                // Update successor's predecessor if needed
-                if successor.addr != info.addr && successor.addr != joining_node.addr {
-                    // This would need a separate connection to update the successor
-                    // For now, we'll let the response handle it
-                }
-                
-                // Transfer keys from bootstrap to joining node if needed
-                let keys_to_transfer = {
-                    let mut state_guard = state.write().await;
-                    state_guard.data.drain().collect::<Vec<_>>()
-                };
-                
-                if !keys_to_transfer.is_empty() {
-                    info!("Bootstrap: Would transfer {} keys to {}", keys_to_transfer.len(), joining_node.addr);
-                    // Note: In a full implementation, we'd send these keys
-                    // For now, they're lost - the node should request them
-                }
-                
-                Response::JoinSuccess { 
-                    successor, 
-                    predecessor 
-                }
-            }
-            
-            Request::DepartRequest { departing_node } => {
-                // Bootstrap-coordinated depart
-                info!("Bootstrap: Processing DepartRequest from {}", departing_node.addr);
-                
-                // Get ring members to find successor and predecessor
-                let members = ring_members.read().await;
-                let member_addrs: Vec<SocketAddr> = members.iter().map(|m| m.addr).collect();
-                drop(members);
-                
-                // Unregister the node
-                {
-                    let mut members = ring_members.write().await;
-                    let before_len = members.len();
-                    members.retain(|n| n.addr != departing_node.addr);
-                    if members.len() < before_len {
-                        info!("Bootstrap: Unregistered departing node {} ({} remaining)", 
-                            departing_node.addr, members.len());
-                    }
-                }
-                
-                // Update bootstrap's own pointers if necessary
-                {
-                    let mut state_guard = state.write().await;
-                    if state_guard.successor.as_ref().map(|s| s.addr) == Some(departing_node.addr) {
-                        // Find next node or set to self
-                        let next = member_addrs.iter()
-                            .filter(|&&a| a != departing_node.addr && a != info.addr)
-                            .next()
-                            .map(|&a| NodeInfo::new(a))
-                            .unwrap_or(info.clone());
-                        state_guard.successor = Some(next.clone());
-                        info!("Bootstrap: Updated successor to {}", next.addr);
-                    }
-                    if state_guard.predecessor.as_ref().map(|p| p.addr) == Some(departing_node.addr) {
-                        // Find previous node or set to self
-                        let prev = member_addrs.iter()
-                            .rev()
-                            .filter(|&&a| a != departing_node.addr && a != info.addr)
-                            .next()
-                            .map(|&a| NodeInfo::new(a))
-                            .unwrap_or(info.clone());
-                        state_guard.predecessor = Some(prev.clone());
-                        info!("Bootstrap: Updated predecessor to {}", prev.addr);
-                    }
-                }
-                
-                Response::DepartSuccess
-            }
-            
-            Request::TransferKeys { to_addr: _ } => {
-                let mut state_guard = state.write().await;
-                let keys: Vec<(String, String)> = state_guard.data.drain().collect();
-                info!("Bootstrap: Transferring {} keys", keys.len());
-                Response::Keys(keys)
-            }
-            
-            Request::TransferKeysTo { target_addr } => {
-                // Bootstrap transfers its keys to the target
-                let keys = {
-                    let mut state_guard = state.write().await;
-                    state_guard.data.drain().collect::<Vec<_>>()
-                };
-                info!("Bootstrap: TransferKeysTo {} ({} keys)", target_addr, keys.len());
-                
-                if !keys.is_empty() {
-                    // Send keys to target (would need to connect and send)
-                    // For now, respond with the keys and let caller handle it
-                    info!("Bootstrap: Keys to transfer: {:?}", keys);
-                }
-                Response::Ok
-            }
-            
-            Request::ReceiveKeys { keys } => {
-                let mut state_guard = state.write().await;
-                for (key, value) in keys {
-                    state_guard.data.insert(key, value);
-                }
-                info!("Bootstrap: Received keys");
-                Response::Ok
-            }
-            
-            Request::Insert { key, value } => {
-                let mut state_guard = state.write().await;
-                state_guard.data.insert(key.clone(), value);
-                debug!("Bootstrap: Stored key '{}'", key);
-                Response::Ok
-            }
-            
-            Request::Query { key, source: _ } => {
-                let state_guard = state.read().await;
-                Response::Value(state_guard.data.get(&key).cloned())
-            }
-            
-            Request::QueryResponse { source: _, value: _ } => {
-                // Bootstrap doesn't need to handle query responses
-                Response::Ok
-            }
-            
-            Request::Delete { key } => {
-                let mut state_guard = state.write().await;
-                state_guard.data.remove(&key);
-                debug!("Bootstrap: Deleted key '{}'", key);
-                Response::Ok
-            }
-        };
-        
-        response.to_bytes()
-    }
-
 
     /// Find the successor for a given address
     pub async fn find_successor(&self, addr: SocketAddr) -> anyhow::Result<NodeInfo> {
@@ -717,3 +478,232 @@ impl BootstrapNode {
     }
 }
 
+/// Handle an incoming request (bootstrap-aware version)
+async fn handle_bootstrap_request(
+    request_bytes: Vec<u8>,
+    from: SocketAddr,
+    info: NodeInfo,
+    state: Arc<RwLock<NodeState>>,
+    ring_members: Arc<RwLock<Vec<NodeInfo>>>,
+) -> anyhow::Result<Vec<u8>> {
+    let request = Request::from_bytes(&request_bytes)?;
+    debug!("Bootstrap received {:?} from {}", request, from);
+    
+    let response = match request {
+        Request::Ping => Response::Pong,
+        
+        Request::FindSuccessor { addr: _ } => {
+            let state_guard = state.read().await;
+            if let Some(ref successor) = state_guard.successor {
+                Response::Successor(successor.clone())
+            } else {
+                Response::Successor(info.clone())
+            }
+        }
+        
+        Request::GetPredecessor => {
+            let state_guard = state.read().await;
+            Response::Predecessor(state_guard.predecessor.clone())
+        }
+        
+        Request::GetSuccessor => {
+            let state_guard = state.read().await;
+            Response::Successor(state_guard.successor.clone().unwrap_or(info.clone()))
+        }
+        
+        Request::SetPredecessor { node } => {
+            let mut state_guard = state.write().await;
+            state_guard.predecessor = Some(node.clone());
+            info!("Bootstrap: Set predecessor to {}", node.addr);
+            Response::Ok
+        }
+        
+        Request::SetSuccessor { node } => {
+            let mut state_guard = state.write().await;
+            state_guard.successor = Some(node.clone());
+            info!("Bootstrap: Set successor to {}", node.addr);
+            Response::Ok
+        }
+        
+        Request::Notify { node } => {
+            let mut state_guard = state.write().await;
+            if state_guard.predecessor.is_none() {
+                state_guard.predecessor = Some(node.clone());
+                info!("Bootstrap: Set predecessor to {}", node.addr);
+            } else if let Some(ref pred) = state_guard.predecessor {
+                if node.addr != pred.addr {
+                    state_guard.predecessor = Some(node.clone());
+                    info!("Bootstrap: Updated predecessor to {}", node.addr);
+                }
+            }
+            Response::Ok
+        }
+        
+        Request::JoinRequest { joining_node } => {
+            // Bootstrap-coordinated join
+            info!("Bootstrap: Processing JoinRequest from {}", joining_node.addr);
+            
+            // Find successor for the joining node
+            let state_guard = state.read().await;
+            let successor = state_guard.successor.clone().unwrap_or(info.clone());
+            let predecessor = state_guard.predecessor.clone();
+            drop(state_guard);
+            
+            // Update bootstrap's pointers
+            {
+                let mut state_guard = state.write().await;
+                
+                // If bootstrap was alone, joining node becomes both successor and predecessor
+                if state_guard.successor.as_ref().map(|s| s.addr) == Some(info.addr) {
+                    state_guard.successor = Some(joining_node.clone());
+                    state_guard.predecessor = Some(joining_node.clone());
+                } else {
+                    // If joining node should be bootstrap's successor (bootstrap is its predecessor)
+                    if predecessor.as_ref().map(|p| p.addr) == Some(info.addr) ||
+                       state_guard.predecessor.is_none() {
+                        state_guard.predecessor = Some(joining_node.clone());
+                    }
+                }
+            }
+            
+            // Register the node
+            {
+                let mut members = ring_members.write().await;
+                if !members.iter().any(|n| n.addr == joining_node.addr) {
+                    members.push(joining_node.clone());
+                    info!("Bootstrap: Registered joining node {} ({} total)", joining_node.addr, members.len());
+                }
+            }
+            
+            // Update successor's predecessor if needed
+            if successor.addr != info.addr && successor.addr != joining_node.addr {
+                // This would need a separate connection to update the successor
+                // For now, we'll let the response handle it
+            }
+            
+            // Transfer keys from bootstrap to joining node if needed
+            let keys_to_transfer = {
+                let mut state_guard = state.write().await;
+                state_guard.data.drain().collect::<Vec<_>>()
+            };
+            
+            if !keys_to_transfer.is_empty() {
+                info!("Bootstrap: Would transfer {} keys to {}", keys_to_transfer.len(), joining_node.addr);
+                // Note: In a full implementation, we'd send these keys
+                // For now, they're lost - the node should request them
+            }
+            
+            Response::JoinSuccess { 
+                successor, 
+                predecessor 
+            }
+        }
+        
+        Request::DepartRequest { departing_node } => {
+            // Bootstrap-coordinated depart
+            info!("Bootstrap: Processing DepartRequest from {}", departing_node.addr);
+            
+            // Get ring members to find successor and predecessor
+            let members = ring_members.read().await;
+            let member_addrs: Vec<SocketAddr> = members.iter().map(|m| m.addr).collect();
+            drop(members);
+            
+            // Unregister the node
+            {
+                let mut members = ring_members.write().await;
+                let before_len = members.len();
+                members.retain(|n| n.addr != departing_node.addr);
+                if members.len() < before_len {
+                    info!("Bootstrap: Unregistered departing node {} ({} remaining)", 
+                          departing_node.addr, members.len());
+                }
+            }
+            
+            // Update bootstrap's own pointers if necessary
+            {
+                let mut state_guard = state.write().await;
+                if state_guard.successor.as_ref().map(|s| s.addr) == Some(departing_node.addr) {
+                    // Find next node or set to self
+                    let next = member_addrs.iter()
+                        .filter(|&&a| a != departing_node.addr && a != info.addr)
+                        .next()
+                        .map(|&a| NodeInfo::new(a))
+                        .unwrap_or(info.clone());
+                    state_guard.successor = Some(next.clone());
+                    info!("Bootstrap: Updated successor to {}", next.addr);
+                }
+                if state_guard.predecessor.as_ref().map(|p| p.addr) == Some(departing_node.addr) {
+                    // Find previous node or set to self
+                    let prev = member_addrs.iter()
+                        .rev()
+                        .filter(|&&a| a != departing_node.addr && a != info.addr)
+                        .next()
+                        .map(|&a| NodeInfo::new(a))
+                        .unwrap_or(info.clone());
+                    state_guard.predecessor = Some(prev.clone());
+                    info!("Bootstrap: Updated predecessor to {}", prev.addr);
+                }
+            }
+            
+            Response::DepartSuccess
+        }
+        
+        Request::TransferKeys { to_addr: _ } => {
+            let mut state_guard = state.write().await;
+            let keys: Vec<(String, String)> = state_guard.data.drain().collect();
+            info!("Bootstrap: Transferring {} keys", keys.len());
+            Response::Keys(keys)
+        }
+        
+        Request::TransferKeysTo { target_addr } => {
+            // Bootstrap transfers its keys to the target
+            let keys = {
+                let mut state_guard = state.write().await;
+                state_guard.data.drain().collect::<Vec<_>>()
+            };
+            info!("Bootstrap: TransferKeysTo {} ({} keys)", target_addr, keys.len());
+            
+            if !keys.is_empty() {
+                // Send keys to target (would need to connect and send)
+                // For now, respond with the keys and let caller handle it
+                info!("Bootstrap: Keys to transfer: {:?}", keys);
+            }
+            Response::Ok
+        }
+        
+        Request::ReceiveKeys { keys } => {
+            let mut state_guard = state.write().await;
+            for (key, value) in keys {
+                state_guard.data.insert(key, value);
+            }
+            info!("Bootstrap: Received keys");
+            Response::Ok
+        }
+        
+        Request::Insert { key, value } => {
+            let mut state_guard = state.write().await;
+            state_guard.data.insert(key.clone(), value);
+            debug!("Bootstrap: Stored key '{}'", key);
+            Response::Ok
+        }
+        
+        Request::Query { key, source: _ } => {
+            let state_guard = state.read().await;
+            Response::Value(state_guard.data.get(&key).cloned())
+        }
+        
+        Request::QueryResponse { source: _, value: _ } => {
+            // Bootstrap doesn't need to handle query responses
+            Response::Ok
+        }
+        
+        Request::Delete { key } => {
+            let mut state_guard = state.write().await;
+            state_guard.data.remove(&key);
+            debug!("Bootstrap: Deleted key '{}'", key);
+            Response::Ok
+        }
+    };
+    
+    response.to_bytes()
+}
