@@ -28,9 +28,9 @@ const N: u64 = 10;
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
     // IP:Port address of the node (this is only 4+2 bytes and lives in the stack Copy)
-    addr: SocketAddr,
+    pub addr: SocketAddr,
     // The ID of the node in the Chord ring (this lives in the heap and needs to use clone())
-    id: u64,
+    pub id: u64,
 }
 
 /// A Chord DHT node
@@ -234,7 +234,7 @@ impl Node {
 
     async fn belongs_to_current (&self, key_hash: u64, node_hash: u64) -> bool {
         let prev = self.state.read().await.predecessor.clone();
-        let prev_hash = Self::hash_value(&prev.unwrap().addr.to_string());
+        let prev_hash = hash_value(&prev.unwrap().addr.to_string());
 
         (prev_hash < node_hash && key_hash > prev_hash && key_hash <= node_hash) ||
         (prev_hash > node_hash && (key_hash > prev_hash || key_hash <= node_hash))
@@ -244,8 +244,8 @@ impl Node {
     /// Insert a key-value pair
     pub async fn insert(&self, key: String, value: String) -> anyhow::Result<()> {
         // Hash the key to find its identifier
-        let key_hash = Self::hash_value(&key);
-        let node_hash = Self::hash_value(&self.info.addr.to_string());
+        let key_hash = hash_value(&key);
+        let node_hash = hash_value(&self.info.addr.to_string());
 
         debug!("Inserting key '{}' with hash {} (node hash {})", key, key_hash, node_hash);
 
@@ -279,8 +279,8 @@ impl Node {
     /// Query function to retrieve a value by key
     pub async fn query(&self, key: String) -> anyhow::Result<()> {
         // Hash the key to find its identifier
-        let key_hash = Self::hash_value(&key);
-        let node_hash = Self::hash_value(&self.info.addr.to_string());
+        let key_hash = hash_value(&key);
+        let node_hash = hash_value(&self.info.addr.to_string());
 
         if key!="*" {
             // If responsible node for the key is this node, retrieve it locally
@@ -317,8 +317,8 @@ impl Node {
     /// Delete a key-value pair
     pub async fn delete(&self, key: String) -> anyhow::Result<()> {
         // Hash the key to find its identifier
-        let key_hash = Self::hash_value(&key);
-        let node_hash = Self::hash_value(&self.info.addr.to_string());
+        let key_hash = hash_value(&key);
+        let node_hash = hash_value(&self.info.addr.to_string());
 
         debug!("Deleting key '{}' with hash {} (node hash {})", key, key_hash, node_hash);
 
@@ -400,8 +400,8 @@ impl Node {
 
             Request::Query { key, source } => {
                 // Hash the key to find its identifier
-                let key_hash = Self::hash_value(&key);
-                let node_hash = Self::hash_value(&self.info.addr.to_string());
+                let key_hash = hash_value(&key);
+                let node_hash = hash_value(&self.info.addr.to_string());
 
                 
                 // If responsible node for the key is this node, retrieve it locally
@@ -438,8 +438,8 @@ impl Node {
                 } else {
                     // Forward the response back to the original requester
                     let request = Request::QueryResponse { source, value };
-                    let source_hash = Self::hash_value(&source.to_string());
-                    let node_hash = Self::hash_value(&self.info.addr.to_string());
+                    let source_hash = hash_value(&source.to_string());
+                    let node_hash = hash_value(&self.info.addr.to_string());
                     let forward_dist = if node_hash >= source_hash {(1 << N) - node_hash + source_hash } 
                     else {source_hash - node_hash };
 

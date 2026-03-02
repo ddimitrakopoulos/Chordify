@@ -264,7 +264,7 @@ impl BootstrapNode {
             if succ.addr != departing_addr {
                 match self.send_request(
                     succ.addr,
-                    Request::SetPredecessor { node: predecessor.clone() }
+                    Request::SetPredecessor { node: predecessor.clone().unwrap() }
                 ).await {
                     Ok(_) => info!("Notified successor {} about departing node {}", succ.addr, departing_addr),
                     Err(e) => warn!("Failed to notify successor: {}", e),

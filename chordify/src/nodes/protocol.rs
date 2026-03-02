@@ -63,7 +63,7 @@ pub enum Response {
     /// The successor node for a given address
     Successor(NodeInfo),
     /// The predecessor node (if any)
-    Predecessor(Option<NodeInfo>),
+    Predecessor(NodeInfo),
     /// Acknowledgment
     Ok,
     /// Value for a key (None if not found)
