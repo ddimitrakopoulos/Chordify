@@ -27,6 +27,8 @@ pub enum Request {
     Query { key: String, source: SocketAddr },
     /// Query response for a key
     QueryResponse { source: SocketAddr, value: Option<String> },
+    /// Query all the key values
+    QueryAll { source: SocketAddr, data: Vec<(u64, HashMap<String, String>)> },
     /// Delete a key
     Delete { key: String },
     

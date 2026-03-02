@@ -238,10 +238,6 @@ impl Node {
         Ok(())
     }
 
-
-
-
-
     async fn belongs_to_current (&self, key_hash: u64, node_hash: u64) -> bool {
         let prev = self.state.read().await.predecessor.clone();
         let prev_hash = hash_value(&prev.addr.to_string());
@@ -320,6 +316,15 @@ impl Node {
         }
         else {
             // Handle wildcard query: retrieve all key-value pairs from this node and forward to successor/predecessor
+            let state = self.state.read().await;
+            let data_clone = state.data.clone();
+            drop(state); // Release the lock before sending
+
+            let request = Request::QueryAll { source: self.info.addr, data: vec![(node_hash, data_clone)] };
+
+            // Forward to successor and predecessor
+            let successor = self.state.read().await.successor.clone();
+            self.send_request_no_response(successor.addr, request.clone()).await?;
             Ok(())
         }
     }
@@ -468,6 +473,35 @@ impl Node {
                 }
             }
             
+            Request::QueryAll { source, data } => {
+                if source == self.info.addr {
+                    // This is the original requester, print all the data
+                    for (node_hash, kv_pairs) in data {
+                        println!("Data from node with hash {}: {:?}", node_hash, kv_pairs);
+                    }
+                    Response::Ok
+                } 
+                else {
+                    // Forward the response back to the original requester
+
+                    // Add own data to the response before forwarding
+                    let state = self.state.read().await;
+                    let own_data_clone = state.data.clone();
+                    let node_hash = hash_value(&self.info.addr.to_string());
+                    let mut current_data = data.clone();
+                    current_data.push((node_hash, own_data_clone));
+
+                    // Update the request with the new data
+                    let request = Request::QueryAll { source, data: current_data };
+
+                    // Forward to successor
+                    let successor = self.state.read().await.successor.clone();
+                    self.send_request_no_response(successor.addr, request).await?;
+
+                    Response::Ok
+                }
+            }
+
             Request::Delete { key } => {
                 match self.delete(key).await {
                     Ok(()) => Response::Ok,
