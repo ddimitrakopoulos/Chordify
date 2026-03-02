@@ -1,46 +1,119 @@
-//! Chordify - P2P Song Sharing Application
-//! 
-//! A peer-to-peer song sharing application using the Chord DHT protocol.
+//! Chordify binary: activate a node with concurrent network
+//! listener and an interactive command loop.
+//!
+//! Usage:
+//! ```text
+//! chordify <my_ip:port> [bootstrap_ip:port]
+//! ```
+//!
+//! If the second argument is supplied the node will join an existing ring via
+//! the bootstrap address.  Otherwise this process becomes the bootstrap node
+//! (first node in a new ring).
 
+use std::io::{self, BufRead};
 use std::net::SocketAddr;
-use tracing::{info, Level};
+use std::thread;
+use std::sync::Arc;
+use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
 use chordify::nodes::Node;
 use chordify::BootstrapNode;
-use std::sync::Arc;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Initialize logging
+fn main() -> anyhow::Result<()> {
+    // logging
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::DEBUG)
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
-    // Parse command line arguments
     let args: Vec<String> = std::env::args().collect();
-    
-    let addr: SocketAddr = args.get(1)
+    let addr: SocketAddr = args
+        .get(1)
         .unwrap_or(&"127.0.0.1:8000".to_string())
         .parse()?;
+    let bootstrap_arg: Option<SocketAddr> = args.get(2).map(|s| s.parse()).transpose()?;
 
-    let join_addr: Option<SocketAddr> = args.get(2)
-        .map(|s| s.parse())
-        .transpose()?;
+    // we will keep an `Arc<Node>` instance for the command thread
+    let command_node: std::sync::Arc<Node>;
+    let network_handle;
 
-    // Join existing ring or create new one as bootstrap
-    if let Some(bootstrap_addr) = join_addr {
-        // Join as regular node
-        info!("Joining ring via bootstrap at {}", bootstrap_addr);
-        let node = Node::new(addr, bootstrap_addr);
-        node.join().await?;
-        Arc::new(node).run().await
+    if let Some(bs_addr) = bootstrap_arg {
+        // regular node
+        let node = Arc::new(Node::new(addr, bs_addr));
+        command_node = Arc::clone(&node);
+
+        // network thread: join then listen
+        network_handle = thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().expect("unable to make runtime");
+            rt.block_on(async move {
+                node.join().await.expect("join failed");
+                let _ = node.run().await;
+            });
+        });
     } else {
-        // Create new ring as bootstrap node
-        info!("Creating new ring as bootstrap node at {}", addr);
+        // bootstrap node: create both a BootstrapNode (for network) and an
+        // `Arc<Node>` for the command loop.  We don't need the bootstrap
+        // instance itself for commands.
         let bootstrap = BootstrapNode::new(addr);
-        bootstrap.run().await
-    }
-}
+        let node_inst = Arc::new(Node::new(addr, addr));
+        command_node = Arc::clone(&node_inst);
 
+        network_handle = thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().expect("unable to make runtime");
+            rt.block_on(async move {
+                let _ = bootstrap.run().await;
+            });
+        });
+    }
+
+    // command thread
+    let bs_for_cmd = bootstrap_arg.clone();
+    let cmds = thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let stdin = io::stdin();
+        for line in stdin.lock().lines() {
+            let line = match line { Ok(l) => l, Err(_) => break };
+            let mut parts = line.trim().split_whitespace();
+            if let Some(cmd) = parts.next() {
+                match cmd {
+                    "insert" => {
+                        if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
+                            rt.block_on(command_node.insert(k.to_string(), v.to_string())).ok();
+                        } else {
+                            println!("usage: insert <key> <value>");
+                        }
+                    }
+                    "query" => {
+                        if let Some(k) = parts.next() {
+                            rt.block_on(command_node.query(k.to_string())).ok();
+                        } else {
+                            println!("usage: query <key>");
+                        }
+                    }
+                    "delete" => {
+                        if let Some(k) = parts.next() {
+                            rt.block_on(command_node.delete(k.to_string())).ok();
+                        } else {
+                            println!("usage: delete <key>");
+                        }
+                    }
+                    "depart" => {
+                        if let Some(bs) = bs_for_cmd {
+                            rt.block_on(command_node.depart(bs)).ok();
+                        } else {
+                            println!("bootstrap node cannot depart");
+                        }
+                    }
+                    "exit" | "quit" => break,
+                    _ => println!("unknown command '{}'", cmd),
+                }
+            }
+        }
+    });
+
+    cmds.join().expect("command thread panicked");
+    network_handle.join().expect("network thread panicked");
+
+    Ok(())
+}
