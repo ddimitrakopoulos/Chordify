@@ -1,8 +1,17 @@
 //! Node - A Chord DHT node implementation
-//!
-//! Uses the P2P communication layer for all network operations.
-//! All join/depart operations are coordinated by the bootstrap node.
-
+//! DONE: Broke NodeInfo into addr and id
+//! DONE: Merged Node and NodeState into a single struct for simplicity
+//! DONE: Made id into a BigUint (160-bit hash) instead of u64 to comply with the Chord specification
+//! DONE: Removed is_bootstrap fn as the bootstrap addr should be set at node creation and not change dynamically
+//! DONE: Removed state_clone and state_arc - we can just use self with async locks for state management
+//! DONE: Made all getters start with get_ for consistency
+//! DONE: Added the is_responsible() function to check if this node is responsible for a given key ID
+//! 
+//! 
+//! 
+//! 
+//! DONE: Added detailed comments and logging for clarity
+//! TO-DO: Why is the bootstrap_addr optional?
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -13,76 +22,103 @@ use tracing::{info, debug, warn};
 use crate::tcp::{Server, connect};
 use super::protocol::{Request, Response, NodeInfo};
 
-use sha1::{Sha1, Digest};
-const N: u64 = 10; // Number of bits in the identifier space (SHA-1 hash size)
+use sha1::{Sha1, Digest}; // SHA-1 is used for hashing the IP:port to get the node ID (160-bit hash)
+use num_bigint::BigUint; // For handling large integers (160-bit hashes) and modular arithmetic
+
+#[derive(Debug, Clone)]
+struct NodeInfo {
+    // IP:Port address of the node (this is only 4+2 bytes and lives in the stack Copy)
+    addr: SocketAddr,
+    // The ID of the node in the Chord ring (this lives in the heapa and needs to use clone())
+    id: BigUint,
+}
 
 /// A Chord DHT node
 #[derive(Debug)]
 pub struct Node {
-    /// This node's info (address only)
+    // IP:Port address and ID of this node
     info: NodeInfo,
-    /// Shared mutable state
-    pub(crate) state: Arc<RwLock<NodeState>>,
-    /// Bootstrap node address (required for join/depart)
-    bootstrap_addr: Option<SocketAddr>,
+    // The ID of the successor in the ring
+    successor: RwLock<Option<NodeInfo>>,
+    // The ID of the predecessor in the ring
+    predecessor: RwLock<Option<NodeInfo>>,
+    // Local key-value storage
+    data: RwLock<HashMap<String, String>>,
+    // Bootstrap node address (required for join/depart)
+    bootstrap_addr: Option<SocketAddr>
 }
 
-// Node is cheap to clone: the fields are `Clone`/`Arc`.
-impl Clone for Node {
-    fn clone(&self) -> Self {
-        Self {
-            info: self.info.clone(),
-            state: Arc::clone(&self.state),
-            bootstrap_addr: self.bootstrap_addr,
+// Helper function that takes an IP:port address and returns its SHA-1 hash as a BigUint (for node ID and key hashing)
+pub fn hash_string_to_biguint(data: &str) -> BigUint {
+    let mut hasher = Sha1::new();
+    
+    // We pass the data string that we the break to bytes.
+    hasher.update(data.as_bytes());
+    
+    // Get the hash result as a byte array (20 bytes for SHA-1)
+    let result = hasher.finalize();
+    
+    // Convert the byte array to a BigUint 
+    BigUint::from_bytes_be(&result)
+}
+
+impl Node {
+    /// Given an IP:port address and bootstrap address we create a new node instance.
+    pub fn new(addr: SocketAddr, bootstrap_addr: Option<SocketAddr>) -> Self {
+        info!("Node with addr: {addr} created with ID: {}", hash_string_to_biguint(&addr.to_string()));
+        Self { 
+            info: NodeInfo {
+                addr,
+                id: hash_string_to_biguint(&addr.to_string()),
+            },
+            successor: RwLock::new(None), 
+            predecessor: RwLock::new(None), 
+            data: RwLock::new(HashMap::new()), 
+            bootstrap_addr   
+        }
+    }
+
+    /// GETTERS
+    pub fn get_addr(&self) -> SocketAddr {
+        self.info.addr
+    }
+    pub fn get_id(&self) -> BigUint {
+        // We return a clone of the BigUint since it's not Copy and we don't want to give out a mutable reference
+        self.info.id.clone()
+    }
+
+    /// Check if this node is responsible for a given key ID
+    pub async fn is_responsible(&self, key_id: &BigUint) -> bool {
+        // We read the predecessor under a lock to ensure we have a consistent view of the ring
+        // state while checking responsibility. We await until we can acquire the lock.
+        let predecessor_guard = self.predecessor.read().await;
+        
+        // If there is no predecessor, then this node is the only node in the ring and is
+        // responsible for all the keys
+        let predecessor_id = match &*predecessor_guard {
+            Some(predecessor) => &predecessor.id,
+            None => return true,
+        };
+
+        // If the ID of the predecessor is the same as this node's ID, then again this node is
+        // responsible for all keys
+        if predecessor_id == &self.info.id {
+            return true;
+        }
+
+        // Check if the key ID falls between the predecessor's ID and this node's ID
+        // Normal case:
+        if predecessor_id < &self.info.id {
+            key_id > predecessor_id && key_id <= &self.info.id
+        } 
+        // Wrap-around case:
+        else { 
+            key_id > predecessor_id || key_id <= &self.info.id
         }
     }
 }
 
-/// Mutable state for a node
-#[derive(Debug)]
-pub struct NodeState {
-    /// Our successor in the ring
-    pub(crate) successor: Option<NodeInfo>,
-    /// Our predecessor in the ring
-    pub(crate) predecessor: Option<NodeInfo>,
-    /// Local key-value storage
-    pub(crate) data: HashMap<String, String>,
-}
-
-impl Node {
-    /// Create a new node bound to the given address
-    pub fn new(addr: SocketAddr) -> Self {
-        let info = NodeInfo::new(addr);
-        let state = Arc::new(RwLock::new(NodeState {
-            successor: None,
-            predecessor: None,
-            data: HashMap::new(),
-        }));
-        info!("Node created at {}", info.addr);
-        Self { info, state, bootstrap_addr: None }
-    }
-    
-    /// Set bootstrap node address (required for join/depart operations)
-    pub fn with_bootstrap(mut self, bootstrap_addr: SocketAddr) -> Self {
-        self.bootstrap_addr = Some(bootstrap_addr);
-        self
-    }
-
-    /// Get this node's address
-    pub fn addr(&self) -> SocketAddr {
-        self.info.addr
-    }
-
-    /// Get this node's info
-    pub fn info(&self) -> NodeInfo {
-        self.info.clone()
-    }
-
-    /// Get a clone of the state Arc (for use by BootstrapNode)
-    pub(crate) fn state_clone(&self) -> Arc<RwLock<NodeState>> {
-        Arc::clone(&self.state)
-    }
-
+{
     /// Create the first node in a new ring (internal use only).
     /// 
     /// **Do not call this method directly.** Use `BootstrapNode::create_ring()` instead.
