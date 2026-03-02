@@ -108,30 +108,32 @@ impl Node {
         self.state.read().await.predecessor.clone()
     }
 
-    /// Check if this node is responsible for a given key ID
-    pub async fn is_responsible(&self, key_id: &String, predecessor_id: u64) -> bool {
-        let key_id_hash = hash_value(key_id);
-        // We read the predecessor under a lock to ensure we have a consistent view of the ring
-        // state while checking responsibility. We await until we can acquire the lock.
-
-        // If there is no predecessor, then this node is the only node in the ring and is
-        // responsible for all the keys
-
-        // If the ID of the predecessor is the same as this node's ID, then again this node is
-        // responsible for all keys
-        if predecessor_id == self.info.id {
+    /// Check if this node is responsible for a given key hash
+    /// Uses the current predecessor from the node's state
+    async fn is_responsible_for_hash(&self, key_hash: u64) -> bool {
+        let predecessor = self.state.read().await.predecessor.clone();
+        let predecessor_id = predecessor.id;
+        
+        // Single node in ring (predecessor is itself or uninitialized)
+        if predecessor_id == self.info.id || predecessor_id == 0 {
             return true;
         }
 
-        // Check if the key ID falls between the predecessor's ID and this node's ID
-        // Normal case:
+        // Check if the key hash falls between predecessor and this node in the Chord ring
+        // Normal case: predecessor_id < node_id
         if predecessor_id < self.info.id {
-            key_id_hash > predecessor_id && key_id_hash <= self.info.id
+            key_hash > predecessor_id && key_hash <= self.info.id
         } 
-        // Wrap-around case:
+        // Wrap-around case: node_id < predecessor_id (ring wraps around)
         else { 
-            key_id_hash > predecessor_id || key_id_hash <= self.info.id
+            key_hash > predecessor_id || key_hash <= self.info.id
         }
+    }
+
+    /// Check if a key belongs to this node (taking a String key)
+    async fn is_responsible_for_key(&self, key: &String) -> bool {
+        let key_hash = hash_value(key);
+        self.is_responsible_for_hash(key_hash).await
     }
 
     // 1. Change `&self` to `self: Arc<Self>`
@@ -252,13 +254,11 @@ impl Node {
     pub async fn insert(&self, key: String, value: String) -> anyhow::Result<()> {
         // Hash the key to find its identifier
         let key_hash = hash_value(&key);
-        let node_hash = hash_value(&self.info.addr.to_string());
 
-        debug!("Inserting key '{}' with hash {} (node hash {})", key, key_hash, node_hash);
+        debug!("Inserting key '{}' with hash {}", key, key_hash);
 
         // If responsible node for the key is this node, store it locally
-        // FIX ME: CHECK BEHAVIOUR ON SAME KEY INSERTS
-        if self.belongs_to_current(key_hash, node_hash).await {
+        if self.is_responsible_for_hash(key_hash).await {
             let mut state = self.state.write().await;
             state.data.insert(key.clone(), value);
             debug!("Stored key '{}' locally", key);
@@ -266,6 +266,7 @@ impl Node {
         }
         // Otherwise, forward to the appropriate node (successor or predecessor)
         else {
+            let node_hash = self.info.id;
             let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
             else {key_hash - node_hash };
             let request = Request::Insert { key, value };
@@ -287,11 +288,10 @@ impl Node {
     pub async fn query(&self, key: String) -> anyhow::Result<()> {
         // Hash the key to find its identifier
         let key_hash = hash_value(&key);
-        let node_hash = hash_value(&self.info.addr.to_string());
 
         if key!="*" {
             // If responsible node for the key is this node, retrieve it locally
-            if self.belongs_to_current(key_hash, node_hash).await {
+            if self.is_responsible_for_hash(key_hash).await {
                 let state = self.state.read().await;
                 let value = state.data.get(&key).cloned();
                 println!("{:?}", value);
@@ -299,6 +299,7 @@ impl Node {
             }
             // Otherwise, forward to the appropriate node (successor or predecessor)
             else {
+                let node_hash = self.info.id;
                 let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
                 else {key_hash - node_hash };
                 let request = Request::Query { key, source: self.info.addr };
@@ -334,13 +335,11 @@ impl Node {
     pub async fn delete(&self, key: String) -> anyhow::Result<()> {
         // Hash the key to find its identifier
         let key_hash = hash_value(&key);
-        let node_hash = hash_value(&self.info.addr.to_string());
 
-        debug!("Deleting key '{}' with hash {} (node hash {})", key, key_hash, node_hash);
+        debug!("Deleting key '{}' with hash {}", key, key_hash);
 
-        // If responsible node for the key is this node, store it locally
-        // FIX ME: CHECK BEHAVIOUR ON SAME KEY INSERTS
-        if self.belongs_to_current(key_hash, node_hash).await {
+        // If responsible node for the key is this node, delete it locally
+        if self.is_responsible_for_hash(key_hash).await {
             let mut state = self.state.write().await;
             state.data.remove(&key);
             debug!("Deleted key '{}' locally", key);
@@ -348,6 +347,7 @@ impl Node {
         }
         // Otherwise, forward to the appropriate node (successor or predecessor)
         else {
+            let node_hash = self.info.id;
             let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
             else {key_hash - node_hash };
             let request = Request::Delete { key };
@@ -391,21 +391,25 @@ impl Node {
             Request::SetPredecessorWithKeys { node } => {
                 let mut state_guard = self.state.write().await;
                 state_guard.predecessor = node.clone();
-                let predecessor_id = state_guard.predecessor.clone().id;
                 info!("Set predecessor to {} with keys", node.addr);
+                drop(state_guard); // Release lock before checking responsibility
 
-                // Find the data that should be transferred to the new predecessor (keys for which the new predecessor is now responsible)
+                // Find the data that should be transferred to the new predecessor
+                // (keys for which this node is no longer responsible)
+                let state = self.state.read().await;
                 let mut new_data = HashMap::new();
-                for (key, value) in state_guard.data.iter() {
-                    if !self.is_responsible(key, predecessor_id).await {
+                for (key, value) in state.data.iter() {
+                    if !self.is_responsible_for_key(key).await {
                         new_data.insert(key.clone(), value.clone());
                     }
-
                 }
+                drop(state);
 
                 // Send the keys to the new predecessor
-                let request = Request::TransferData { data: new_data };
-                self.send_request_no_response(node.addr, request).await?;
+                if !new_data.is_empty() {
+                    let request = Request::TransferData { data: new_data };
+                    self.send_request_no_response(node.addr, request).await?;
+                }
                 Response::Ok
             }
 
@@ -419,19 +423,20 @@ impl Node {
             Request::Query { key, source } => {
                 // Hash the key to find its identifier
                 let key_hash = hash_value(&key);
-                let node_hash = hash_value(&self.info.addr.to_string());
-
                 
                 // If responsible node for the key is this node, retrieve it locally
-                if self.belongs_to_current(key_hash, node_hash).await {
+                if self.is_responsible_for_hash(key_hash).await {
                     let state = self.state.read().await;
                     let value = state.data.get(&key).cloned();
-                    let predecessor = self.state.read().await.predecessor.clone();
+                    let predecessor = state.predecessor.clone();
+                    drop(state);
+                    
                     let request = Request::QueryResponse { source, value };
                     self.send_request_no_response(predecessor.addr, request).await?;
                 }
                 // Otherwise, forward to the appropriate node (successor or predecessor)
                 else {
+                    let node_hash = self.info.id;
                     let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
                     else {key_hash - node_hash };
                     let request = Request::Query { key, source };
@@ -509,10 +514,13 @@ impl Node {
                 }
             },
             Request::TransferData { data } => {
+                // Only accept keys that this node is responsible for
                 let mut state = self.state.write().await;
                 for (key, value) in data {
                     state.data.insert(key, value);
                 }
+                drop(state);
+                info!("Received and stored transferred data");
                 Response::Ok
             },
             _ => Response::Error("Unsupported request".to_string()),

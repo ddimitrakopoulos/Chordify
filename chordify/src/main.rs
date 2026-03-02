@@ -43,12 +43,27 @@ fn main() -> anyhow::Result<()> {
         let node = Arc::new(Node::new(addr, bs_addr));
         command_node = Arc::clone(&node);
 
-        // network thread: join then listen
+        // network thread: start listener FIRST, then join
         network_handle = thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().expect("unable to make runtime");
             rt.block_on(async move {
+                let node_clone = Arc::clone(&node);
+                
+                // Start the listener in a background task
+                tokio::spawn(async move {
+                    let _ = node_clone.run().await;
+                });
+                
+                // Wait a bit for the listener to start
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                
+                // Now join the ring - the node can receive TransferData requests
                 node.join().await.expect("join failed");
-                let _ = node.run().await;
+                
+                // Keep the runtime alive
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                }
             });
         });
     } else {
