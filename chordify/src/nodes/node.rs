@@ -32,6 +32,10 @@ pub struct NodeInfo {
     pub addr: SocketAddr,
     // The ID of the node in the Chord ring (this lives in the heap and needs to use clone())
     pub id: u64,
+    /// Replication factor
+    k: u64,
+    /// Replication type
+    t: u8,
 }
 
 /// A Chord DHT node
@@ -53,6 +57,8 @@ pub struct NodeState {
     predecessor: NodeInfo,
     // Local key-value storage
     data: HashMap<String, String>,
+    // Replicated data (hash of key, replication position, key-value pairs)
+    replicated_data: HashMap<u64, (u64, HashMap<String, String>)>,
 }
 
 // Helper function that takes an IP:port address and returns its SHA-1 hash as a BigUint (for node ID and key hashing)
@@ -79,11 +85,14 @@ impl Node {
             info: NodeInfo {
                 addr,
                 id: hash_value(&addr.to_string()),
+                k: 1,
+                t: 0
             },
             state: Arc::new(RwLock::new(NodeState {
                 successor: NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: 0 },
                 predecessor: NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: 0 }, 
                 data: HashMap::new(), 
+                replicated_data: HashMap::new(),
             })),
             bootstrap_addr   
         }
@@ -545,7 +554,7 @@ impl Node {
             //         Response::Ok
             //     }
             // }
-            
+
             Request::QueryAll { source, data } => {
 
                 // Add own data to the response before forwarding
