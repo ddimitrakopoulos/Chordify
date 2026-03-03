@@ -448,11 +448,11 @@ impl Node {
                 // Send the keys to the new predecessor
                 if !new_data.is_empty() {
                     let request = Request::TransferData { data: new_data };
-                    self.send_request_no_response(node.addr, request).await?;
+                    self.send_request(node.addr, request).await?;
                 }
 
                 // Send replicated data that should be transferred to the new predecessor
-                let request = Request::TransferReplicas { new_replicated_data: state.replicated_data.clone() };
+                let request = Request::TransferReplicas { new_replicated_data: state.replicated_data.clone() , node_addr: self.info.addr };
                 self.send_request_no_response(node.addr, request).await?;
                 drop(state);
 
@@ -511,59 +511,6 @@ impl Node {
                 
             }
 
-            // Request::QueryResponse { source, value } => {
-            //     if source == self.info.addr {
-            //         println!("{:?}", value);
-            //         Response::Ok
-            //     } else {
-            //         // Forward the response back to the original requester
-            //         let request = Request::QueryResponse { source, value };
-            //         let source_hash = hash_value(&source.to_string());
-            //         let node_hash = hash_value(&self.info.addr.to_string());
-            //         let forward_dist = if node_hash >= source_hash {(1 << N) - node_hash + source_hash } 
-            //         else {source_hash - node_hash };
-
-            //         // Forward to successor if it's closer, otherwise forward to predecessor
-            //         if forward_dist < (1 << (N - 1)) {
-            //             let successor = self.state.read().await.successor.clone();
-            //             self.send_request_no_response(successor.addr, request).await?;
-            //         } else {
-            //             let predecessor = self.state.read().await.predecessor.clone();
-            //             self.send_request_no_response(predecessor.addr, request).await?;
-            //         }
-            //         Response::Ok
-            //     }
-            // }
-            
-            // Request::QueryAll { source, data } => {
-            //     if source == self.info.addr {
-            //         // This is the original requester, print all the data
-            //         for (node_hash, kv_pairs) in data {
-            //             println!("Data from node with hash {}: {:?}", node_hash, kv_pairs);
-            //         }
-            //         Response::Ok
-            //     } 
-            //     else {
-            //         // Forward the response back to the original requester
-
-            //         // Add own data to the response before forwarding
-            //         let state = self.state.read().await;
-            //         let own_data_clone = state.data.clone();
-            //         let node_hash = hash_value(&self.info.addr.to_string());
-            //         let mut current_data = data.clone();
-            //         current_data.push((node_hash, own_data_clone));
-
-            //         // Update the request with the new data
-            //         let request = Request::QueryAll { source, data: current_data };
-
-            //         // Forward to successor
-            //         let successor = self.state.read().await.successor.clone();
-            //         self.send_request_no_response(successor.addr, request).await?;
-
-            //         Response::Ok
-            //     }
-            // }
-
             Request::QueryAll { source, data } => {
 
                 // Add own data to the response before forwarding
@@ -614,7 +561,7 @@ impl Node {
                 Response::Ok
             },
 
-            Request::TransferReplicas { new_replicated_data } => {
+            Request::TransferReplicas { new_replicated_data, node_addr } => {
                 // Move new replicated data into our state
                 let mut state = self.state.write().await;
                 for (key_hash, (replication_pos, kv_pairs)) in new_replicated_data {
@@ -624,23 +571,59 @@ impl Node {
 
                 // Send message to successors to update their replicas
                 let request = Request::UpdateReplicas { 
-                    new_node: self.info.clone(), 
-                    new_node_predecessor: state.predecessor.clone(), 
+                    data: state.data.clone(), 
                     k_left: state.k-1,
                 };
                 drop(state);
 
+                // Send the UpdateReplicas request to the successor
+                let successor = self.state.read().await.successor.clone();
+                self.send_request_no_response(node_addr, request).await?;
+
                 Response::Ok
             },
 
-            Request::UpdateReplicas { new_node, new_node_predecessor, k_left } => {
-                let state = self.state.read().await;
-                let new_node_hash = new_node.id;
-                let predecessor_hash = new_node_predecessor.id;
+            Request::UpdateReplicas { data, k_left } => {
+                let mut state = self.state.write().await;
+                //new hashmap<u64, (u64, HashMap<String, String>)>
+                let mut new_replicated_data = HashMap::new();
 
-                for (node_hash, (replication_pos, kv_pairs)) in state.replicated_data.iter() {
-                    
+                // For each stored replica, if it 'includes' (matches) the provided data,
+                // we consider that replica chain progressed one step for that entry.
+                // Here "includes" is interpreted as equality of the kv datasets.
+                for (node_hash, (rep_pos, kv_pairs)) in state.replicated_data.iter_mut() {
+                    for (key, value) in kv_pairs.iter() {
+                        if !data.includes(key, value) {
+                            // decrement replication position but never underflow
+                            if *rep_pos > 0 {
+                                new_replicated_data.insert(*node_hash, (*rep_pos - 1, kv_pairs.clone()));
+                            }
+                        }
+                        else {
+                            // If the provided data includes this key-value pair, we keep it at the same replication position
+                            new_replicated_data.insert(*node_hash, (*rep_pos, kv_pairs.clone()));
+                        }
+                    }
                 }
+
+                if k_left == state.k - 1{
+                    // If this is the first step in the replication chain, we add all the new data as replicas at position k-1
+                    for (key_hash, (replication_pos, kv_pairs)) in data {
+                        new_replicated_data.insert(key_hash, (k_left, kv_pairs));
+                    }
+                }
+
+                state.replicated_data = new_replicated_data;
+                info!("Updated replicas with new data, k_left={}", k_left);
+
+                if k_left > 0 {
+                    // Forward the UpdateReplicas request to the successor with decremented k_left
+                    let successor = self.state.read().await.successor.clone();
+                    let request = Request::UpdateReplicas { data, k_left: k_left - 1 };
+                    self.send_request_no_response(successor.addr, request).await?;
+                }
+
+                Response::Ok
             }
 
 
