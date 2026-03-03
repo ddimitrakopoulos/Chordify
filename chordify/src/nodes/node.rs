@@ -53,8 +53,8 @@ pub struct NodeState {
     predecessor: NodeInfo,
     // Local key-value storage
     data: HashMap<String, String>,
-    // Replicated data (hash of node, replication position, key-value pairs)
-    replicated_data: HashMap<u64, (u64, HashMap<String, String>)>,
+    // Replicated data (song name, song value, replication position, hash node)
+    replicated_data: HashMap<String, (String, u64, u64)>,
     /// Replication factor
     k: u64,
     /// Replication type
@@ -564,9 +564,7 @@ impl Node {
             Request::TransferReplicas { new_replicated_data, node_addr } => {
                 // Move new replicated data into our state
                 let mut state = self.state.write().await;
-                for (key_hash, (replication_pos, kv_pairs)) in new_replicated_data {
-                    state.replicated_data.insert(key_hash, (replication_pos, kv_pairs));
-                }
+                state.replicated_data = new_replicated_data;
                 info!("Received and stored transferred replicas");
 
                 // Send message to successors to update their replicas
@@ -585,7 +583,7 @@ impl Node {
 
             Request::UpdateReplicas { data, k_left } => {
                 let mut state = self.state.write().await;
-                //new hashmap<u64, (u64, HashMap<String, String>)>
+                //new hashmap<String>
                 let mut new_replicated_data = HashMap::new();
 
                 // For each stored replica, if it 'includes' (matches) the provided data,
