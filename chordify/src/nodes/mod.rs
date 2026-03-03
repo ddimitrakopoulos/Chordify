@@ -3,5 +3,5 @@ pub mod node;
 pub mod protocol;
 
 pub use bootstrap::BootstrapNode;
-pub use node::Node;
-pub use protocol::{NodeInfo, Request, Response};
+pub use node::{Node, NodeInfo};
+pub use protocol::{Request, Response};

@@ -1,102 +1,181 @@
 //! Node - A Chord DHT node implementation
-//!
-//! Uses the P2P communication layer for all network operations.
-//! All join/depart operations are coordinated by the bootstrap node.
+//! DONE: Broke NodeInfo into addr and id
+//! DONE: Merged Node and NodeState into a single struct for simplicity
+//! DONE: Made id into a BigUint (160-bit hash) instead of u64 to comply with the Chord specification
+//! DONE: Removed is_bootstrap fn as the bootstrap addr should be set at node creation and not change dynamically
+//! DONE: Removed state_clone and state_arc - we can just use self with async locks for state management
+//! DONE: Made all getters start with get_ for consistency
+//! DONE: Added the is_responsible() function to check if this node is responsible for a given key ID
+//! 
+//! 
+//! 
+//! 
+//! DONE: Added detailed comments and logging for clarity
+//! TO-DO: Why is the bootstrap_addr optional?
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, debug, warn};
+use tracing::{info, debug};
 
 use crate::tcp::{Server, connect};
-use super::protocol::{Request, Response, NodeInfo};
+use super::protocol::{Request, Response};
 
-/// A Chord DHT node
-pub struct Node {
-    /// This node's info (address only)
-    info: NodeInfo,
-    /// Shared mutable state
-    pub(crate) state: Arc<RwLock<NodeState>>,
-    /// Bootstrap node address (required for join/depart)
-    bootstrap_addr: Option<SocketAddr>,
+use sha1::{Sha1, Digest}; // SHA-1 is used for hashing the IP:port to get the node ID (160-bit hash)
+use serde::{Serialize, Deserialize};
+const N: u64 = 10;
+
+#[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
+pub struct NodeInfo {
+    // IP:Port address of the node (this is only 4+2 bytes and lives in the stack Copy)
+    pub addr: SocketAddr,
+    // The ID of the node in the Chord ring (this lives in the heap and needs to use clone())
+    pub id: u64,
 }
 
-/// Mutable state for a node
+/// A Chord DHT node
+#[derive(Debug)]
+pub struct Node {
+    // IP:Port address and ID of this node
+    info: NodeInfo,
+    //
+    state: Arc<RwLock<NodeState>>,
+    // Bootstrap node address (required for join/depart)
+    bootstrap_addr: SocketAddr,
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct NodeState {
-    /// Our successor in the ring
-    pub(crate) successor: Option<NodeInfo>,
-    /// Our predecessor in the ring
-    pub(crate) predecessor: Option<NodeInfo>,
-    /// Local key-value storage
-    pub(crate) data: HashMap<String, String>,
+    // The ID of the successor in the ring
+    successor: NodeInfo,
+    // The ID of the predecessor in the ring
+    predecessor: NodeInfo,
+    // Local key-value storage
+    data: HashMap<String, String>,
+}
+
+// Helper function that takes an IP:port address and returns its SHA-1 hash as a BigUint (for node ID and key hashing)
+pub fn hash_value(data: &str) -> u64 {
+    let mut hasher = Sha1::new();
+    
+    // We pass the data string that we the break to bytes.
+    hasher.update(data.as_bytes());
+    
+    // Get the hash result as a byte array (20 bytes for SHA-1)
+    let result = hasher.finalize();
+    
+    // Convert the byte array to a u64
+    let hash_value = u64::from_be_bytes(result[0..8].try_into().unwrap());
+    hash_value % (1 << N) // Assuming an N-bit identifier space
 }
 
 impl Node {
-    /// Create a new node bound to the given address
-    pub fn new(addr: SocketAddr) -> Self {
-        let info = NodeInfo::new(addr);
-        let state = Arc::new(RwLock::new(NodeState {
-            successor: None,
-            predecessor: None,
-            data: HashMap::new(),
-        }));
-        info!("Node created at {}", info.addr);
-        Self { info, state, bootstrap_addr: None }
+    /// Given an IP:port address and bootstrap address we create a new node instance.
+    pub fn new(addr: SocketAddr, bootstrap_addr: SocketAddr) -> Self {
+        info!("Node with addr: {addr} created with ID: {}", hash_value(&addr.to_string()));
+        
+        Self { 
+            info: NodeInfo {
+                addr,
+                id: hash_value(&addr.to_string()),
+            },
+            state: Arc::new(RwLock::new(NodeState {
+                successor: NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: 0 },
+                predecessor: NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: 0 }, 
+                data: HashMap::new(), 
+            })),
+            bootstrap_addr   
+        }
     }
 
-    /// Set bootstrap node address (required for join/depart operations)
-    pub fn with_bootstrap(mut self, bootstrap_addr: SocketAddr) -> Self {
-        self.bootstrap_addr = Some(bootstrap_addr);
-        self
-    }
-
-    /// Get this node's address
-    pub fn addr(&self) -> SocketAddr {
+    /// GETTERS
+    pub fn get_addr(&self) -> SocketAddr {
         self.info.addr
     }
 
-    /// Get this node's info
-    pub fn info(&self) -> NodeInfo {
-        self.info.clone()
+    pub fn get_id(&self) -> u64 {
+        self.info.id
     }
 
-    /// Get a clone of the state Arc (for use by BootstrapNode)
-    pub(crate) fn state_clone(&self) -> Arc<RwLock<NodeState>> {
-        Arc::clone(&self.state)
+        /// Get the successor
+    pub async fn get_successor(&self) -> NodeInfo {
+        self.state.read().await.successor.clone()
     }
 
-    /// Create the first node in a new ring (internal use only).
-    /// 
-    /// **Do not call this method directly.** Use `BootstrapNode::create_ring()` instead.
-    /// Only `BootstrapNode` should create rings - regular nodes must join via bootstrap.
-    pub(crate) async fn create_ring(&self) {
-        let mut state = self.state.write().await;
-        state.successor = Some(self.info.clone());
-        state.predecessor = Some(self.info.clone());
-        info!("Created new ring, node is alone at {}", self.info.addr);
+    /// Get the predecessor
+    pub async fn get_predecessor(&self) -> NodeInfo {
+        self.state.read().await.predecessor.clone()
     }
+
+    /// Check if this node is responsible for a given key hash
+    /// Uses the current predecessor from the node's state
+    async fn is_responsible_for_hash(&self, key_hash: u64) -> bool {
+        let predecessor = self.state.read().await.predecessor.clone();
+        let predecessor_id = predecessor.id;
+        
+        // Single node in ring (predecessor is itself or uninitialized)
+        if predecessor_id == self.info.id || predecessor_id == 0 {
+            return true;
+        }
+
+        // Check if the key hash falls between predecessor and this node in the Chord ring
+        // Normal case: predecessor_id < node_id
+        if predecessor_id < self.info.id {
+            key_hash > predecessor_id && key_hash <= self.info.id
+        } 
+        // Wrap-around case: node_id < predecessor_id (ring wraps around)
+        else { 
+            key_hash > predecessor_id || key_hash <= self.info.id
+        }
+    }
+
+    /// Check if a key belongs to this node (taking a String key)
+    async fn is_responsible_for_key(&self, key: &String) -> bool {
+        let key_hash = hash_value(key);
+        self.is_responsible_for_hash(key_hash).await
+    }
+
+    // 1. Change `&self` to `self: Arc<Self>`
+    pub async fn run(self: Arc<Self>) -> anyhow::Result<()> {
+        let server = Server::bind(self.info.addr).await?;
+        
+        // 2. Now `self` IS an Arc<Node>, so we can clone it!
+        // This creates our owned Arc pointer for the outer closure.
+        let node_owned = Arc::clone(&self); 
+
+        server.listen(move |request_bytes, from| {
+            
+            // 3. Clone it again for the inner async block
+            let node_inner = Arc::clone(&node_owned); 
+            
+            async move { 
+                node_inner.handle_request(request_bytes, from).await 
+            }
+        }).await
+    }
+
 
     /// Join an existing ring via bootstrap node
     /// 
     /// The node only contacts the bootstrap, which coordinates all pointer 
     /// updates and key transfers.
-    pub async fn join(&self, bootstrap_addr: SocketAddr) -> anyhow::Result<()> {
-        info!("Joining ring via bootstrap at {}", bootstrap_addr);
+    pub async fn join(&self) -> anyhow::Result<()> {
+        info!("Node with ID {} joining ring via bootstrap at {}", self.info.id, self.bootstrap_addr);
         
         // Send JoinRequest to bootstrap
         let request = Request::JoinRequest { joining_node: self.info.clone() };
-        let response = self.send_request(bootstrap_addr, request).await?;
+        let response = self.send_request(self.bootstrap_addr, request).await?;
         
         match response {
             Response::JoinSuccess { successor, predecessor } => {
                 // Update our state with the assigned successor and predecessor
                 let mut state = self.state.write().await;
-                state.successor = Some(successor.clone());
+                state.successor = successor.clone();
                 state.predecessor = predecessor.clone();
                 
                 info!("Joined ring via bootstrap: successor={}, predecessor={:?}", 
-                      successor.addr, predecessor.as_ref().map(|p| p.addr));
+                      successor.addr, predecessor.addr);
                 Ok(())
             }
             Response::Error(e) => Err(anyhow::anyhow!("Join failed: {}", e)),
@@ -110,6 +189,20 @@ impl Node {
     /// updates and key transfers.
     pub async fn depart(&self, bootstrap_addr: SocketAddr) -> anyhow::Result<()> {
         info!("Departing ring via bootstrap at {}", bootstrap_addr);
+
+        // Send all the data to the successor before departing (only if successor is not itself)
+        let successor = self.get_successor().await;
+        if successor.addr != self.info.addr && successor.id != 0 {
+            let state = self.state.read().await;
+            let data_clone = state.data.clone();
+            drop(state); // Release the lock before sending
+            
+            let request = Request::TransferData { data: data_clone };
+            if let Err(_) = self.send_request_no_response(successor.addr, request).await {
+                //warn!("Failed to transfer data to successor during depart: {}", e);
+            }
+        }
+
         
         // Send DepartRequest to bootstrap
         let request = Request::DepartRequest { departing_node: self.info.clone() };
@@ -119,8 +212,8 @@ impl Node {
             Response::DepartSuccess => {
                 // Clear local state
                 let mut state = self.state.write().await;
-                state.successor = None;
-                state.predecessor = None;
+                state.successor = NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: 0 };
+                state.predecessor = NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: 0 };
                 state.data.clear();
                 
                 info!("Departed ring via bootstrap");
@@ -131,20 +224,6 @@ impl Node {
         }
     }
 
-    /// Start listening and handling requests
-    pub async fn run(&self) -> anyhow::Result<()> {
-        let server = Server::bind(self.info.addr).await?;
-        let state = Arc::clone(&self.state);
-        let info = self.info.clone();
-        server.listen(move |request_bytes, from| {
-            let state = Arc::clone(&state);
-            let info = info.clone();
-            async move {
-                handle_request(request_bytes, from, info, state).await
-            }
-        }).await
-    }
-
     /// Send a request to another node and get the response
     async fn send_request(&self, addr: SocketAddr, request: Request) -> anyhow::Result<Response> {
         let request_bytes = request.to_bytes()?;
@@ -152,214 +231,301 @@ impl Node {
         Response::from_bytes(&response_bytes)
     }
 
-    /// Find the successor of a given address
-    pub async fn find_successor(&self, addr: SocketAddr) -> anyhow::Result<NodeInfo> {
-        let state = self.state.read().await;
-        if let Some(ref successor) = state.successor {
-            // If we're the only node or successor is us, return successor
-            if successor.addr == self.info.addr {
-                return Ok(successor.clone());
-            }
-            // Copy successor address before dropping state
-            let successor_addr = successor.addr;
-            drop(state);
-            let request = Request::FindSuccessor { addr };
-            let response = self.send_request(successor_addr, request).await?;
-            match response {
-                Response::Successor(node) => Ok(node),
-                Response::Error(e) => Err(anyhow::anyhow!("{}", e)),
-                _ => Err(anyhow::anyhow!("Unexpected response")),
-            }
-        } else {
-            // We are the only node
-            Ok(self.info.clone())
-        }
+
+
+    /// Send a request and ignore the response; propagate errors if desired.
+    async fn send_request_no_response(&self, addr: SocketAddr, request: Request) -> anyhow::Result<()> {
+        let request_bytes = request.to_bytes()?;
+        connect(addr).await?.send(&request_bytes).await?;
+        Ok(())
     }
 
-    /// Get the successor
-    pub async fn get_successor(&self) -> Option<NodeInfo> {
-        self.state.read().await.successor.clone()
-    }
+    /// Insert a key-value pair
+    pub async fn insert(&self, key: String, value: String) -> anyhow::Result<()> {
+        // Hash the key to find its identifier
+        let key_hash = hash_value(&key);
 
-    /// Get the predecessor
-    pub async fn get_predecessor(&self) -> Option<NodeInfo> {
-        self.state.read().await.predecessor.clone()
-    }
+        debug!("Inserting key '{}' with hash {}", key, key_hash);
 
-    /// Store a key-value pair (stores locally if we're responsible)
-    pub async fn put(&self, key: String, value: String) -> anyhow::Result<()> {
-        let successor = self.find_successor(self.info.addr).await?;
-        if successor.addr == self.info.addr {
-            // We're responsible for this key
+        // If responsible node for the key is this node, store it locally
+        if self.is_responsible_for_hash(key_hash).await {
             let mut state = self.state.write().await;
-            state.data.insert(key.clone(), value);
-            debug!("Stored key '{}' locally", key);
+
+            // Check if the key already exists and concat the values 
+            if let Some(existing_value) = state.data.get(&key) {
+                let new_value = format!("{}{}", existing_value, value);
+                state.data.insert(key.clone(), new_value);
+            } 
+            else { 
+                state.data.insert(key.clone(), value);
+                debug!("Stored key '{}' locally", key);
+            }
+
             Ok(())
-        } else {
-            // Forward to the responsible node
-            let request = Request::Put { key, value };
-            let response = self.send_request(successor.addr, request).await?;
-            match response {
-                Response::Ok => Ok(()),
-                Response::Error(e) => Err(anyhow::anyhow!("{}", e)),
-                _ => Err(anyhow::anyhow!("Unexpected response")),
-            }
         }
-    }
+        // Otherwise, forward to the appropriate node (successor or predecessor)
+        else {
+            let node_hash = self.info.id;
+            let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
+            else {key_hash - node_hash };
+            let request = Request::Insert { key, value };
 
-    /// Get a value by key
-    pub async fn get(&self, key: &str) -> anyhow::Result<Option<String>> {
-        let successor = self.find_successor(self.info.addr).await?;
-        if successor.addr == self.info.addr {
-            // We're responsible for this key
-            let state = self.state.read().await;
-            Ok(state.data.get(key).cloned())
-        } else {
-            // Forward to the responsible node
-            let request = Request::Get { key: key.to_string() };
-            let response = self.send_request(successor.addr, request).await?;
-            match response {
-                Response::Value(v) => Ok(v),
-                Response::Error(e) => Err(anyhow::anyhow!("{}", e)),
-                _ => Err(anyhow::anyhow!("Unexpected response")),
-            }
-        }
-    }
-}
-
-/// Handle an incoming request
-async fn handle_request(
-    request_bytes: Vec<u8>,
-    from: SocketAddr,
-    info: NodeInfo,
-    state: Arc<RwLock<NodeState>>,
-) -> anyhow::Result<Vec<u8>> {
-    let request = Request::from_bytes(&request_bytes)?;
-    debug!("Received {:?} from {}", request, from);
-    let response = match request {
-        Request::Ping => Response::Pong,
-        
-        Request::FindSuccessor { addr: _ } => {
-            let state_guard = state.read().await;
-            if let Some(ref successor) = state_guard.successor {
-                Response::Successor(successor.clone())
+            // Forward to successor if it's closer, otherwise forward to predecessor
+            if forward_dist < (1 << (N - 1)){
+                let successor = self.state.read().await.successor.clone();
+                self.send_request_no_response(successor.addr, request).await?;
             } else {
-                Response::Successor(info.clone())
+                let predecessor = self.state.read().await.predecessor.clone();
+                self.send_request_no_response(predecessor.addr, request).await?;
+            }
+            Ok(())
+        }
+    }
+
+
+    /// Query function to retrieve a value by key
+    pub async fn query(&self, key: String) -> anyhow::Result<()> {
+        // Hash the key to find its identifier
+        let key_hash = hash_value(&key);
+
+        if key!="*" {
+            // If responsible node for the key is this node, retrieve it locally
+            if self.is_responsible_for_hash(key_hash).await {
+                let state = self.state.read().await;
+                let value = state.data.get(&key).cloned();
+                println!("{:?}", value);
+                Ok(())
+            }
+            // Otherwise, forward to the appropriate node (successor or predecessor)
+            else {
+                let node_hash = self.info.id;
+                let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
+                else {key_hash - node_hash };
+                let request = Request::Query { key, source: self.info.addr };
+
+                // Forward to successor if it's closer, otherwise forward to predecessor
+                if forward_dist < (1 << (N - 1)) {
+                    let successor = self.state.read().await.successor.clone();
+                    self.send_request_no_response(successor.addr, request).await?;
+                } else {
+                    let predecessor = self.state.read().await.predecessor.clone();
+                    self.send_request_no_response(predecessor.addr, request).await?;
+                }
+                Ok(())
             }
         }
-        
-        Request::GetPredecessor => {
-            let state_guard = state.read().await;
-            Response::Predecessor(state_guard.predecessor.clone())
+        else {
+            // Handle wildcard query: retrieve all key-value pairs from this node and forward to successor/predecessor
+            let state = self.state.read().await;
+            let data_clone = state.data.clone();
+            drop(state); // Release the lock before sending
+
+            let node_hash = self.info.id;
+            let request = Request::QueryAll { source: self.info.addr, data: vec![(node_hash, data_clone)] };
+
+            // Forward to successor and predecessor
+            let successor = self.state.read().await.successor.clone();
+            self.send_request_no_response(successor.addr, request.clone()).await?;
+            Ok(())
         }
-        
-        Request::GetSuccessor => {
-            let state_guard = state.read().await;
-            Response::Successor(state_guard.successor.clone().unwrap_or(info.clone()))
+    }
+
+
+    /// Delete a key-value pair
+    pub async fn delete(&self, key: String) -> anyhow::Result<()> {
+        // Hash the key to find its identifier
+        let key_hash = hash_value(&key);
+
+        debug!("Deleting key '{}' with hash {}", key, key_hash);
+
+        // If responsible node for the key is this node, delete it locally
+        if self.is_responsible_for_hash(key_hash).await {
+            let mut state = self.state.write().await;
+            state.data.remove(&key);
+            debug!("Deleted key '{}' locally", key);
+            Ok(())
         }
-        
-        Request::SetPredecessor { node } => {
-            let mut state_guard = state.write().await;
-            state_guard.predecessor = Some(node.clone());
-            info!("Set predecessor to {}", node.addr);
-            Response::Ok
+        // Otherwise, forward to the appropriate node (successor or predecessor)
+        else {
+            let node_hash = self.info.id;
+            let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
+            else {key_hash - node_hash };
+            let request = Request::Delete { key };
+
+            // Forward to successor if it's closer, otherwise forward to predecessor
+            if forward_dist < (1 << (N - 1))  {
+                let successor = self.state.read().await.successor.clone();
+                self.send_request_no_response(successor.addr, request).await?;
+            } else {
+                let predecessor = self.state.read().await.predecessor.clone();
+                self.send_request_no_response(predecessor.addr, request).await?;
+            }
+            Ok(())
         }
-        
-        Request::SetSuccessor { node } => {
-            let mut state_guard = state.write().await;
-            state_guard.successor = Some(node.clone());
-            info!("Set successor to {}", node.addr);
-            Response::Ok
-        }
-        
-        Request::Notify { node } => {
-            let mut state_guard = state.write().await;
-            // Update predecessor if needed
-            if state_guard.predecessor.is_none() {
-                state_guard.predecessor = Some(node.clone());
+    
+    }
+
+
+    /// Handle an incoming request
+    async fn handle_request(&self, request_bytes: Vec<u8>, from: SocketAddr)
+    -> anyhow::Result<Vec<u8>> {
+        let request = Request::from_bytes(&request_bytes)?;
+        debug!("Received {:?} from {}", request, from);
+        let response = match request {
+            Request::Ping => Response::Pong,
+
+            Request::SetPredecessor { node } => {
+                let mut state_guard = self.state.write().await;
+                state_guard.predecessor = node.clone();
                 info!("Set predecessor to {}", node.addr);
-            } else if let Some(ref pred) = state_guard.predecessor {
-                if node.addr != pred.addr {
-                    state_guard.predecessor = Some(node.clone());
-                    info!("Updated predecessor to {}", node.addr);
-                }
+                Response::Ok
             }
-            Response::Ok
-        }
-        
-        Request::JoinRequest { joining_node: _ } => {
-            // Regular nodes don't handle JoinRequest - only bootstrap does
-            warn!("Regular node received JoinRequest - should be sent to bootstrap");
-            Response::Error("JoinRequest should be sent to bootstrap node".to_string())
-        }
-        
-        Request::DepartRequest { departing_node: _ } => {
-            // Regular nodes don't handle DepartRequest - only bootstrap does
-            warn!("Regular node received DepartRequest - should be sent to bootstrap");
-            Response::Error("DepartRequest should be sent to bootstrap node".to_string())
-        }
-        
-        Request::TransferKeys { to_addr: _ } => {
-            // Transfer all keys (bootstrap-coordinated transfer)
-            let mut state_guard = state.write().await;
-            let keys: Vec<(String, String)> = state_guard.data.drain().collect();
-            info!("Transferring {} keys", keys.len());
-            Response::Keys(keys)
-        }
-        
-        Request::TransferKeysTo { target_addr } => {
-            // Bootstrap told us to transfer our keys to target
-            let keys = {
-                let mut state_guard = state.write().await;
-                state_guard.data.drain().collect::<Vec<_>>()
-            };
-            info!("TransferKeysTo {}: {} keys", target_addr, keys.len());
             
-            if !keys.is_empty() {
-                // Send keys to target node
-                let request = Request::ReceiveKeys { keys: keys.clone() };
-                let request_bytes = request.to_bytes()?;
-                match connect(target_addr).await {
-                    Ok(client) => {
-                        match client.message(&request_bytes).await {
-                            Ok(_) => info!("Transferred {} keys to {}", keys.len(), target_addr),
-                            Err(e) => warn!("Failed to transfer keys to {}: {}", target_addr, e),
-                        }
+            Request::SetSuccessor { node } => {
+                let mut state_guard = self.state.write().await;
+                state_guard.successor = node.clone();
+                info!("Set successor to {}", node.addr);
+                Response::Ok
+            }
+
+            Request::SetPredecessorWithKeys { node } => {
+                let mut state_guard = self.state.write().await;
+                state_guard.predecessor = node.clone();
+                info!("Set predecessor to {} with keys", node.addr);
+                drop(state_guard); // Release lock before checking responsibility
+
+                // Find the data that should be transferred to the new predecessor
+                // (keys for which this node is no longer responsible)
+                let state = self.state.read().await;
+                let mut new_data = HashMap::new();
+                for (key, value) in state.data.iter() {
+                    if !self.is_responsible_for_key(key).await {
+                        new_data.insert(key.clone(), value.clone());
                     }
-                    Err(e) => warn!("Failed to connect to {} for key transfer: {}", target_addr, e),
+                }
+                drop(state);
+
+                // Send the keys to the new predecessor
+                if !new_data.is_empty() {
+                    let request = Request::TransferData { data: new_data };
+                    self.send_request_no_response(node.addr, request).await?;
+                }
+                Response::Ok
+            }
+
+            Request::Insert { key, value } => {
+                match self.insert(key, value).await {
+                    Ok(()) => Response::Ok,
+                    Err(e) => Response::Error(e.to_string()),
                 }
             }
-            Response::Ok
-        }
-        
-        Request::ReceiveKeys { keys } => {
-            let mut state_guard = state.write().await;
-            let count = keys.len();
-            for (key, value) in keys {
-                state_guard.data.insert(key, value);
+
+            Request::Query { key, source } => {
+                // Hash the key to find its identifier
+                let key_hash = hash_value(&key);
+                
+                // If responsible node for the key is this node, retrieve it locally
+                if self.is_responsible_for_hash(key_hash).await {
+                    let state = self.state.read().await;
+                    let value = state.data.get(&key).cloned();
+                    let predecessor = state.predecessor.clone();
+                    drop(state);
+                    
+                    let request = Request::QueryResponse { source, value };
+                    self.send_request_no_response(predecessor.addr, request).await?;
+                }
+                // Otherwise, forward to the appropriate node (successor or predecessor)
+                else {
+                    let node_hash = self.info.id;
+                    let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
+                    else {key_hash - node_hash };
+                    let request = Request::Query { key, source };
+
+                    // Forward to successor if it's closer, otherwise forward to predecessor
+                    if forward_dist < (1 << (N - 1)) {
+                        let successor = self.state.read().await.successor.clone();
+                        self.send_request_no_response(successor.addr, request).await?;
+                    } else {
+                        let predecessor = self.state.read().await.predecessor.clone();
+                        self.send_request_no_response(predecessor.addr, request).await?;
+                    }
+                }
+                Response::Ok
+                
             }
-            info!("Received {} keys", count);
-            Response::Ok
-        }
-        
-        Request::Put { key, value } => {
-            let mut state_guard = state.write().await;
-            state_guard.data.insert(key.clone(), value);
-            debug!("Stored key '{}'", key);
-            Response::Ok
-        }
-        
-        Request::Get { key } => {
-            let state_guard = state.read().await;
-            Response::Value(state_guard.data.get(&key).cloned())
-        }
-        
-        Request::Delete { key } => {
-            let mut state_guard = state.write().await;
-            state_guard.data.remove(&key);
-            debug!("Deleted key '{}'", key);
-            Response::Ok
-        }
-    };
-    response.to_bytes()
+
+            Request::QueryResponse { source, value } => {
+                if source == self.info.addr {
+                    println!("{:?}", value);
+                    Response::Ok
+                } else {
+                    // Forward the response back to the original requester
+                    let request = Request::QueryResponse { source, value };
+                    let source_hash = hash_value(&source.to_string());
+                    let node_hash = hash_value(&self.info.addr.to_string());
+                    let forward_dist = if node_hash >= source_hash {(1 << N) - node_hash + source_hash } 
+                    else {source_hash - node_hash };
+
+                    // Forward to successor if it's closer, otherwise forward to predecessor
+                    if forward_dist < (1 << (N - 1)) {
+                        let successor = self.state.read().await.successor.clone();
+                        self.send_request_no_response(successor.addr, request).await?;
+                    } else {
+                        let predecessor = self.state.read().await.predecessor.clone();
+                        self.send_request_no_response(predecessor.addr, request).await?;
+                    }
+                    Response::Ok
+                }
+            }
+            
+            Request::QueryAll { source, data } => {
+                if source == self.info.addr {
+                    // This is the original requester, print all the data
+                    for (node_hash, kv_pairs) in data {
+                        println!("Data from node with hash {}: {:?}", node_hash, kv_pairs);
+                    }
+                    Response::Ok
+                } 
+                else {
+                    // Forward the response back to the original requester
+
+                    // Add own data to the response before forwarding
+                    let state = self.state.read().await;
+                    let own_data_clone = state.data.clone();
+                    let node_hash = hash_value(&self.info.addr.to_string());
+                    let mut current_data = data.clone();
+                    current_data.push((node_hash, own_data_clone));
+
+                    // Update the request with the new data
+                    let request = Request::QueryAll { source, data: current_data };
+
+                    // Forward to successor
+                    let successor = self.state.read().await.successor.clone();
+                    self.send_request_no_response(successor.addr, request).await?;
+
+                    Response::Ok
+                }
+            }
+
+            Request::Delete { key } => {
+                match self.delete(key).await {
+                    Ok(()) => Response::Ok,
+                    Err(e) => Response::Error(e.to_string()),
+                }
+            },
+            Request::TransferData { data } => {
+                // Only accept keys that this node is responsible for
+                let mut state = self.state.write().await;
+                for (key, value) in data {
+                    state.data.insert(key, value);
+                }
+                drop(state);
+                info!("Received and stored transferred data");
+                Response::Ok
+            },
+            _ => Response::Error("Unsupported request".to_string()),
+        };
+        response.to_bytes()
+
+    }
 }

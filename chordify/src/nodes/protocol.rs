@@ -5,42 +5,30 @@
 
 use serde::{Serialize, Deserialize};
 use std::net::SocketAddr;
-
-/// Information about a node (address only)
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct NodeInfo {
-    pub addr: SocketAddr,
-}
-
-impl NodeInfo {
-    pub fn new(addr: SocketAddr) -> Self {
-        Self { addr }
-    }
-}
+use std::collections::HashMap;
+use super::node::NodeInfo;
 
 /// Request messages sent between nodes
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
     /// Ping to check if node is alive
     Ping,
-    /// Find the successor of a given address
-    FindSuccessor { addr: SocketAddr },
-    /// Get this node's predecessor
-    GetPredecessor,
-    /// Get this node's successor
-    GetSuccessor,
-    /// Notify node that we might be its predecessor
-    Notify { node: NodeInfo },
+    /// Set this node's predecessor and transfer keys later
+    SetPredecessorWithKeys { node: NodeInfo },
     /// Set this node's predecessor directly (sent by bootstrap during coordination)
     SetPredecessor { node: NodeInfo },
     /// Set this node's successor directly (sent by bootstrap during coordination)
     SetSuccessor { node: NodeInfo },
     /// Request keys to transfer (returns all keys)
-    TransferKeys { to_addr: SocketAddr },
+    TransferData { data: HashMap<String, String> },
     /// Store a key-value pair
-    Put { key: String, value: String },
+    Insert { key: String, value: String },
     /// Retrieve a value by key
-    Get { key: String },
+    Query { key: String, source: SocketAddr },
+    /// Query response for a key
+    QueryResponse { source: SocketAddr, value: Option<String> },
+    /// Query all the key values
+    QueryAll { source: SocketAddr, data: Vec<(u64, HashMap<String, String>)> },
     /// Delete a key
     Delete { key: String },
     
@@ -52,13 +40,7 @@ pub enum Request {
     
     /// Request to depart from the ring (sent to bootstrap node)
     /// Bootstrap will coordinate all pointer updates and key transfers
-    DepartRequest { departing_node: NodeInfo },
-    
-    /// Command from bootstrap to transfer keys directly to another node
-    TransferKeysTo { target_addr: SocketAddr },
-    
-    /// Receive keys from another node (sent during key transfer)
-    ReceiveKeys { keys: Vec<(String, String)> },
+    DepartRequest { departing_node: NodeInfo }
 }
 
 /// Response messages sent between nodes
@@ -69,7 +51,7 @@ pub enum Response {
     /// The successor node for a given address
     Successor(NodeInfo),
     /// The predecessor node (if any)
-    Predecessor(Option<NodeInfo>),
+    Predecessor(NodeInfo),
     /// Acknowledgment
     Ok,
     /// Value for a key (None if not found)
@@ -84,7 +66,7 @@ pub enum Response {
     /// Join successful - includes the assigned successor and predecessor
     JoinSuccess { 
         successor: NodeInfo, 
-        predecessor: Option<NodeInfo>,
+        predecessor: NodeInfo,
     },
     
     /// Depart acknowledged - node can now shut down

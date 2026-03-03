@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ main, communication, develop, membership-management ]
+    branches: [ main, communication, develop, membership-management , operation-integration]
   pull_request:
     branches: [ main ]
 
