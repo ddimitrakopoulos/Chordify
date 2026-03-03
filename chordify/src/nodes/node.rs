@@ -250,8 +250,17 @@ impl Node {
         // If responsible node for the key is this node, store it locally
         if self.is_responsible_for_hash(key_hash).await {
             let mut state = self.state.write().await;
-            state.data.insert(key.clone(), value);
-            debug!("Stored key '{}' locally", key);
+
+            // Check if the key already exists and concat the values 
+            if let Some(existing_value) = state.data.get(&key) {
+                let new_value = format!("{}{}", existing_value, value);
+                state.data.insert(key.clone(), new_value);
+            } 
+            else { 
+                state.data.insert(key.clone(), value);
+                debug!("Stored key '{}' locally", key);
+            }
+
             Ok(())
         }
         // Otherwise, forward to the appropriate node (successor or predecessor)
