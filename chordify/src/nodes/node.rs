@@ -53,7 +53,7 @@ pub struct NodeState {
     predecessor: NodeInfo,
     // Local key-value storage
     data: HashMap<String, String>,
-    // Replicated data (hash of key, replication position, key-value pairs)
+    // Replicated data (hash of node, replication position, key-value pairs)
     replicated_data: HashMap<u64, (u64, HashMap<String, String>)>,
     /// Replication factor
     k: u64,
@@ -424,6 +424,8 @@ impl Node {
                 let mut state_guard = self.state.write().await;
                 state_guard.successor = node.clone();
                 info!("Set successor to {}", node.addr);
+                drop(state_guard); // Release lock before checking responsibility
+
                 Response::Ok
             }
 
@@ -442,13 +444,18 @@ impl Node {
                         new_data.insert(key.clone(), value.clone());
                     }
                 }
-                drop(state);
 
                 // Send the keys to the new predecessor
                 if !new_data.is_empty() {
                     let request = Request::TransferData { data: new_data };
                     self.send_request_no_response(node.addr, request).await?;
                 }
+
+                // Send replicated data that should be transferred to the new predecessor
+                let request = Request::TransferReplicas { new_replicated_data: state.replicated_data.clone() };
+                self.send_request_no_response(node.addr, request).await?;
+                drop(state);
+
                 Response::Ok
             }
 
@@ -606,6 +613,37 @@ impl Node {
                 info!("Received and stored transferred data");
                 Response::Ok
             },
+
+            Request::TransferReplicas { new_replicated_data } => {
+                // Move new replicated data into our state
+                let mut state = self.state.write().await;
+                for (key_hash, (replication_pos, kv_pairs)) in new_replicated_data {
+                    state.replicated_data.insert(key_hash, (replication_pos, kv_pairs));
+                }
+                info!("Received and stored transferred replicas");
+
+                // Send message to successors to update their replicas
+                let request = Request::UpdateReplicas { 
+                    new_node: self.info.clone(), 
+                    new_node_predecessor: state.predecessor.clone(), 
+                    k_left: state.k-1,
+                };
+                drop(state);
+
+                Response::Ok
+            },
+
+            Request::UpdateReplicas { new_node, new_node_predecessor, k_left } => {
+                let state = self.state.read().await;
+                let new_node_hash = new_node.id;
+                let predecessor_hash = new_node_predecessor.id;
+
+                for (node_hash, (replication_pos, kv_pairs)) in state.replicated_data.iter() {
+                    
+                }
+            }
+
+
             _ => Response::Error("Unsupported request".to_string()),
         };
         response.to_bytes()

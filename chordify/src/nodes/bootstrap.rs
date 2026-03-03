@@ -233,40 +233,6 @@ impl BootstrapNode {
                 Err(e) => warn!("Failed to notify predecessor: {}", e),
             }
         }
-        
-        // Transfer replicas from previous k-1 nodes to new node
-        // Find position of new node
-        //drop(self.ring_members.read().await); // release read lock before acquiring write lock in send_request
-        let members = self.ring_members.read().await;
-
-        // Loop the ring members to find the index of the joining node
-        let mut join_index = 0;
-        for (i, member) in members.iter().enumerate() {
-            if member.addr == joining_addr {
-                join_index = i;
-                break;
-            }
-        }
-
-        let replica_offset = (join_index -((self.k as usize)-1)+members.len())%members.len();
-        let request = Request::GetReplicas { 
-            new_node: joining_node.clone(),
-            keys: vec![], // empty vector means "get all keys"
-            k_left: self.k-1,
-        };
-
-        // Send the GetReplicas request to the node at replica_offset index
-        let _ = self.send_request(members[replica_offset].addr, request).await?;
-
-        // Update replicas of following nodes
-        let successor_index = (join_index + 1) % members.len();
-        let request = Request::UpdateReplicas {
-            new_node: joining_node.clone(),
-            new_node_predecessor: predecessor.clone(),
-            k_left: self.k-1,
-        };
-
-        let _ = self.send_request(members[successor_index].addr, request).await?;
 
         info!("Join coordination complete for {}", joining_addr);
         Ok((successor, predecessor))
