@@ -67,10 +67,12 @@ pub enum Response {
     
     // === Bootstrap-coordinated operation responses ===
     
-    /// Join successful - includes the assigned successor and predecessor
+    /// Join successful - includes the assigned successor, predecessor, and replication parameters
     JoinSuccess { 
         successor: NodeInfo, 
         predecessor: NodeInfo,
+        k: u64,
+        t: u8,
     },
     
     /// Depart acknowledged - node can now shut down

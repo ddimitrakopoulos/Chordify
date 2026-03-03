@@ -103,7 +103,7 @@ impl BootstrapNode {
                 // Bootstrap-coordinated join
                 match self.coordinate_join(joining_node.addr).await {
                     Ok((successor, predecessor)) => {
-                        Response::JoinSuccess { successor, predecessor } 
+                        Response::JoinSuccess { successor, predecessor, k: self.k, t: self.t } 
                     },
                     Err(e) => {
                         warn!("Failed to coordinate join: {}", e);

@@ -70,7 +70,7 @@ fn main() -> anyhow::Result<()> {
         // bootstrap node: create both a BootstrapNode (for network) and an
         // `Arc<Node>` for the command loop.  We don't need the bootstrap
         // instance itself for commands.
-        let bootstrap = BootstrapNode::new(addr);
+        let bootstrap = BootstrapNode::new(addr, 5, 1);
         let node_inst = Arc::new(Node::new(addr, addr));
         command_node = Arc::clone(&node_inst);
 
