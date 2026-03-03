@@ -25,8 +25,8 @@ pub enum Request {
     Insert { key: String, value: String },
     /// Retrieve a value by key
     Query { key: String, source: SocketAddr },
-    /// Query response for a key
-    QueryResponse { source: SocketAddr, value: Option<String> },
+    // /// Query response for a key
+    // QueryResponse { source: SocketAddr, value: Option<String> },
     /// Query all the key values
     QueryAll { source: SocketAddr, data: Vec<(u64, HashMap<String, String>)> },
     /// Delete a key
@@ -54,6 +54,10 @@ pub enum Response {
     Predecessor(NodeInfo),
     /// Acknowledgment
     Ok,
+    /// Query response for a key
+    QueryResponse { source: SocketAddr, value: Option<String> },
+    // Resporse to QueryAll - includes all key-value pairs from the queried node
+    QueryAll{ source: SocketAddr, data: Vec<(u64, HashMap<String, String>)> },
     /// Value for a key (None if not found)
     Value(Option<String>),
     /// Transferred keys (for TransferKeys)

@@ -2,6 +2,7 @@
 
 use chordify::tcp::{Server, connect, connect_with_timeout};
 use chordify::nodes::{Node, Request, Response};
+use chordify::nodes::node::hash_value;
 use std::sync::Arc;
 use chordify::BootstrapNode;
 use std::net::SocketAddr;
@@ -41,8 +42,10 @@ async fn send_insert(addr: SocketAddr, key: &str, value: &str) -> anyhow::Result
     }
 }
 
-/// Send a query request and return the optional value
-async fn send_query(addr: SocketAddr, key: &str, source: SocketAddr) -> anyhow::Result<Option<String>> {
+/// Send a query request and return a vector of (hash, values).
+/// This mirrors the return type of `Node::query` so callers can easily
+/// compare results with the in‑process implementation.
+async fn send_query(addr: SocketAddr, key: &str, source: SocketAddr) -> anyhow::Result<Vec<(u64, Vec<String>)>> {
     let request = Request::Query {
         key: key.to_string(),
         source,
@@ -50,8 +53,22 @@ async fn send_query(addr: SocketAddr, key: &str, source: SocketAddr) -> anyhow::
     let bytes = request.to_bytes()?;
     let response_bytes = connect(addr).await?.message(&bytes).await?;
     match Response::from_bytes(&response_bytes)? {
-        Response::Value(v) => Ok(v),
-        Response::Ok => Ok(None), // ack from node when query has been forwarded or handled
+        Response::QueryResponse { source: _, value } => {
+            if let Some(v) = value {
+                let hash = hash_value(key);
+                let vals = vec![v];
+                let result = vec![(hash, vals)];
+                tprintln!("send_query -> {:?}", result);
+                Ok(result)
+            } else {
+                tprintln!("send_query -> none");
+                Ok(vec![])
+            }
+        }
+        Response::Ok => {
+            tprintln!("send_query got Ok (no value)");
+            Ok(vec![])
+        }
         Response::Error(e) => Err(anyhow::anyhow!(e)),
         other => Err(anyhow::anyhow!("unexpected response: {:?}", other)),
     }
@@ -311,12 +328,13 @@ async fn test_ring_single_node_crud() {
 
     // perform CRUD via network requests
     send_insert(node_addr, "foo", "bar").await.unwrap();
-    let _v = send_query(node_addr, "foo", node_addr).await.unwrap();
+    let v = send_query(node_addr, "foo", node_addr).await.unwrap();
+    assert!(!v.is_empty(), "expected to find inserted value");
     // value may arrive asynchronously via QueryResponse; we only ensure the
     // query call itself completes without error.
     send_delete(node_addr, "foo").await.unwrap();
     let v2 = send_query(node_addr, "foo", node_addr).await.unwrap();
-    assert_eq!(v2, None);
+    assert!(v2.is_empty(), "expected nothing after delete");
 }
 
 /// Add multiple nodes, insert data before and after joins, then depart one

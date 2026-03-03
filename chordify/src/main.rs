@@ -101,7 +101,19 @@ fn main() -> anyhow::Result<()> {
                     }
                     "query" => {
                         if let Some(k) = parts.next() {
-                            rt.block_on(command_node.query(k.to_string())).ok();
+                            // the query function returns a vector of (hash, values)
+                            let results = rt.block_on(command_node.query(k.to_string()));
+                            if results.is_empty() {
+                                println!("no entries found");
+                            } else {
+                                for (hash, vals) in results {
+                                    if vals.is_empty() {
+                                        println!("key hash {}: <none>", hash);
+                                    } else {
+                                        println!("key hash {}: {}", hash, vals.join(", "));
+                                    }
+                                }
+                            }
                         } else {
                             println!("usage: query <key>");
                         }
