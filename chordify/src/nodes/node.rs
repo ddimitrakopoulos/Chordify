@@ -583,42 +583,44 @@ impl Node {
 
             Request::UpdateReplicas { data, k_left } => {
                 let mut state = self.state.write().await;
-                //new hashmap<String>
-                let mut new_replicated_data = HashMap::new();
 
-                // For each stored replica, if it 'includes' (matches) the provided data,
-                // we consider that replica chain progressed one step for that entry.
-                // Here "includes" is interpreted as equality of the kv datasets.
-                for (node_hash, (rep_pos, kv_pairs)) in state.replicated_data.iter_mut() {
-                    for (key, value) in kv_pairs.iter() {
-                        if !data.includes(key, value) {
-                            // decrement replication position but never underflow
-                            if *rep_pos > 0 {
-                                new_replicated_data.insert(*node_hash, (*rep_pos - 1, kv_pairs.clone()));
-                            }
-                        }
-                        else {
-                            // If the provided data includes this key-value pair, we keep it at the same replication position
-                            new_replicated_data.insert(*node_hash, (*rep_pos, kv_pairs.clone()));
+                // new hashmap<String, (String, u64, u64)>
+                let mut new_replicated_data: HashMap<String, (String, u64, u64)> = HashMap::new();
+
+                let predecessor_id = state.predecessor.id;
+                let successor_addr = state.successor.addr;
+
+                for (key, (value, replication_pos, node_hash)) in state.replicated_data.iter() {
+                    if data.get(key).is_some_and(|v| v == value) {
+                        // If it exists with the same value, keep as-is
+                        new_replicated_data.insert(key.clone(), (value.clone(), *replication_pos, *node_hash));
+                    } else {
+                        // Otherwise decrement position and keep only if still > 0
+                        if *replication_pos > 1 {
+                            new_replicated_data.insert(
+                                key.clone(),
+                                (value.clone(), replication_pos - 1, *node_hash),
+                            );
                         }
                     }
-                }
 
-                if k_left == state.k - 1{
-                    // If this is the first step in the replication chain, we add all the new data as replicas at position k-1
-                    for (key_hash, (replication_pos, kv_pairs)) in data {
-                        new_replicated_data.insert(key_hash, (k_left, kv_pairs));
+                    if k_left == state.k - 1 {
+                        for (key, value) in data.iter() {
+                            new_replicated_data.insert(key.clone(), (value.clone(), k_left, predecessor_id));
+                        }
                     }
                 }
 
                 state.replicated_data = new_replicated_data;
-                info!("Updated replicas with new data, k_left={}", k_left);
 
+                // Forward once (not per-item)
                 if k_left > 0 {
-                    // Forward the UpdateReplicas request to the successor with decremented k_left
-                    let successor = self.state.read().await.successor.clone();
-                    let request = Request::UpdateReplicas { data, k_left: k_left - 1 };
-                    self.send_request_no_response(successor.addr, request).await?;
+                    let request = Request::UpdateReplicas {
+                        data,
+                        k_left: k_left - 1,
+                    };
+                    drop(state);
+                    self.send_request_no_response(successor_addr, request).await?;
                 }
 
                 Response::Ok
