@@ -30,11 +30,11 @@
 - [x] **Graceful Departure:** Υλοποίηση `depart(nodeID)`. Ενημέρωση γειτόνων και ανακατανομή κλειδιών πριν την έξοδο.
 
 ### Φάση 4: Λειτουργίες DHT & Routing (Basic Chord)
-- [ ] **Routing Logic:** Κάθε κόμβος κρατάει pointers για `successor` και `predecessor`.
-- [ ] **Insert Operation:** Υλοποίηση `insert(key, value)`. Αν το key υπάρχει, γίνεται `concat` (update).
-- [ ] **Query Operation:** Υλοποίηση `query(key)` για εντοπισμό value. Χειρισμός του wildcard `*` για επιστροφή όλων των κλειδιών.
-- [ ] **Delete Operation:** Υλοποίηση `delete(key)`.
-- [ ] **Hashing Logic:** Hashing του `key` (τίτλος τραγουδιού) για εύρεση υπεύθυνου κόμβου.
+- [x] **Routing Logic:** Κάθε κόμβος κρατάει pointers για `successor` και `predecessor`.
+- [x] **Insert Operation:** Υλοποίηση `insert(key, value)`. Αν το key υπάρχει, γίνεται `concat` (update).
+- [x] **Query Operation:** Υλοποίηση `query(key)` για εντοπισμό value. Χειρισμός του wildcard `*` για επιστροφή όλων των κλειδιών.
+- [x] **Delete Operation:** Υλοποίηση `delete(key)`.
+- [x] **Hashing Logic:** Hashing του `key` (τίτλος τραγουδιού) για εύρεση υπεύθυνου κόμβου.
 - [ ] *(Bonus)* **Finger Tables:** Υλοποίηση λογαριθμικής δρομολόγησης (προαιρετικό).
 
 ### Φάση 5: Replication & Consistency
