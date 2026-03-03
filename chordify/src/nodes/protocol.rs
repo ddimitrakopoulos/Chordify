@@ -40,7 +40,13 @@ pub enum Request {
     
     /// Request to depart from the ring (sent to bootstrap node)
     /// Bootstrap will coordinate all pointer updates and key transfers
-    DepartRequest { departing_node: NodeInfo }
+    DepartRequest { departing_node: NodeInfo },
+    
+    /// Request to transfer replicas to new node
+    GetReplicas { new_node: NodeInfo, keys: Vec<(u64,u64,Vec<(String, String)>)>, k_left: u64 },
+
+    /// Request to update replicas to new node
+    UpdateReplicas { new_node: NodeInfo, new_node_predecessor: NodeInfo, k_left: u64 },
 }
 
 /// Response messages sent between nodes
@@ -64,7 +70,7 @@ pub enum Response {
     Keys(Vec<(String, String)>),
     /// Error response
     Error(String),
-    
+
     // === Bootstrap-coordinated operation responses ===
     
     /// Join successful - includes the assigned successor, predecessor, and replication parameters
