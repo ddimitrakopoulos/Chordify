@@ -664,7 +664,7 @@ impl Node {
                 // Now, add any new keys from incoming data that are not already in replicated_data
                 for (key, value) in data.iter() {
                     if !state.replicated_data.contains_key(key) {
-                        new_replicated_data.insert(key.clone(), (value.clone(), 1, startingNodeInfo.clone()));
+                        new_replicated_data.insert(key.clone(), (value.clone(), k_left, startingNodeInfo.clone()));
                     }
                 }
 
