@@ -533,11 +533,19 @@ impl Node {
         else {
             // Handle wildcard query: retrieve all key-value pairs from this node and forward to successor/predecessor
             let state = self.state.read().await;
-            let data_clone = state.data.clone();
+            let data_clone = state.replicated_data.clone();
             drop(state); // Release the lock before sending
 
-            let node_hash = self.info.id;
-            let request = Request::QueryAll { source: self.info.addr, data: vec![(node_hash, data_clone)] };
+            let mut map = HashMap::new();
+            let mut node_hash = self.info.id;
+            for (k, (v, pos, node_info )) in data_clone {
+                if pos == 1 {
+                    map.insert(k, v);
+                    node_hash = node_info.id;
+                }
+            }
+            
+            let request = Request::QueryAll { source: self.info.addr, data: vec![(node_hash, map)] };
 
             // Forward to successor and predecessor
             let successor = self.state.read().await.successor.clone();
@@ -744,47 +752,105 @@ impl Node {
             }
 
             Request::Query { key, source } => {
-                // Hash the key to find its identifier
-                let key_hash = hash_value(&key);
-                
-                // If responsible node for the key is this node, retrieve it locally
-                if self.is_responsible_for_hash(key_hash).await {
-                    let state = self.state.read().await;
-                    let value = state.data.get(&key).cloned();
-                    //let predecessor = state.predecessor.clone();
-                    drop(state);
+                let state = self.state.read().await;
+                let k = state.k;
+                let t = state.t;
+                drop(state);
+
+                if k <= 1 {
+                    let key_hash = hash_value(&key);
                     
-                    Response::QueryResponse { source, value }
-                }
-                // Otherwise, forward to the appropriate node (successor or predecessor)
-                else {
-                    let node_hash = self.info.id;
-                    let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
-                    else {key_hash - node_hash };
-                    let request = Request::Query { key, source };
-                    let mut response = Response::Ok; // Placeholder response in case forwarding fails
-
-                    // Forward to successor if it's closer, otherwise forward to predecessor
-                    if forward_dist < (1 << (N - 1)) {
-                        let successor = self.state.read().await.successor.clone();
-                        response = self.send_request(successor.addr, request).await?;
-
-                    } else {
-                        let predecessor = self.state.read().await.predecessor.clone();
-                        response = self.send_request(predecessor.addr, request).await?;
+                    // If responsible node for the key is this node, retrieve it locally
+                    if self.is_responsible_for_hash(key_hash).await {
+                        let state = self.state.read().await;
+                        let value = state.data.get(&key).cloned();
+                        //let predecessor = state.predecessor.clone();
+                        drop(state);
+                        
+                        Response::QueryResponse { source, value }
                     }
+                    // Otherwise, forward to the appropriate node (successor or predecessor)
+                    else {
+                        let node_hash = self.info.id;
+                        let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
+                        else {key_hash - node_hash };
+                        let request = Request::Query { key, source };
+                        let mut response = Response::Ok; // Placeholder response in case forwarding fails
 
-                    match response {
-                        Response::QueryResponse { source: _, value } => {
-                            Response::QueryResponse { source, value }
+                        // Forward to successor if it's closer, otherwise forward to predecessor
+                        if forward_dist < (1 << (N - 1)) {
+                            let successor = self.state.read().await.successor.clone();
+                            response = self.send_request(successor.addr, request).await?;
+
+                        } else {
+                            let predecessor = self.state.read().await.predecessor.clone();
+                            response = self.send_request(predecessor.addr, request).await?;
                         }
-                        _ => {
-                            debug!("Failed to get response from successor during query");
-                            Response::QueryResponse { source, value: None }
+
+                        match response {
+                            Response::QueryResponse { source: _, value } => {
+                                Response::QueryResponse { source, value }
+                            }
+                            _ => {
+                                debug!("Failed to get response from successor during query");
+                                Response::QueryResponse { source, value: None }
+                            }
                         }
                     }
+                } else if t == 0 {
+                    let key_hash = hash_value(&key);
+                    
+                    // If responsible node for the key is this node, retrieve it locally
+                    if self.is_responsible_for_hash(key_hash).await {
+                        let (successor_addr, k) = {
+                            let state = self.state.read().await;
+                            (state.successor.addr, state.k)
+                        };
+
+                        let request = Request::QueryLastReplica { key, k_left: k - 1 };
+                        let response = self.send_request(successor_addr, request).await;
+
+                        match response {
+                            Ok(Response::QueryResponse { source, value }) => {
+                                Response::QueryResponse { source , value }
+                            }
+                            _ => {
+                                debug!("Failed to get response from successor during query");
+                                Response::QueryResponse { source , value: None }
+                            }
+                        }
+                    }
+                    // Otherwise, forward to the appropriate node (successor or predecessor)
+                    else {
+                        let node_hash = self.info.id;
+                        let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
+                        else {key_hash - node_hash };
+                        let request = Request::Query { key, source };
+                        let mut response = Response::Ok; // Placeholder response in case forwarding fails
+
+                        // Forward to successor if it's closer, otherwise forward to predecessor
+                        if forward_dist < (1 << (N - 1)) {
+                            let successor = self.state.read().await.successor.clone();
+                            response = self.send_request(successor.addr, request).await?;
+
+                        } else {
+                            let predecessor = self.state.read().await.predecessor.clone();
+                            response = self.send_request(predecessor.addr, request).await?;
+                        }
+
+                        match response {
+                            Response::QueryResponse { source: _, value } => {
+                                Response::QueryResponse { source, value }
+                            }
+                            _ => {
+                                debug!("Failed to get response from successor during query");
+                                Response::QueryResponse { source, value: None }
+                            }
+                        }
+                    }
+                } else {
+                    Response::Ok
                 }
-                //Response::Ok
                 
             }
 
@@ -803,47 +869,97 @@ impl Node {
                             Response::QueryResponse { source: self.info.addr, value: None }
                         }
                     }
-                }
-                else {
-                    // This is the last replica in the chain, so return the value locally
+                } else {
+                    // This is the last replica in the chain, so return the replicated value locally
                     let state = self.state.read().await;
-                    let value = state.data.get(&key).cloned();
+                    let value = state
+                        .replicated_data
+                        .get(&key)
+                        .map(|(v, _, _)| v.clone());
                     drop(state);
-                    
+
                     Response::QueryResponse { source: self.info.addr, value }
                 }
             }
 
             Request::QueryAll { source, data } => {
-
-                // Add own data to the response before forwarding
                 let state = self.state.read().await;
-                let own_data_clone = state.data.clone();
-                let node_hash = hash_value(&self.info.addr.to_string());
-                let mut current_data = data.clone();
-                current_data.push((node_hash, own_data_clone));
+                let k = state.k;
+                let t = state.t;
+                drop(state);
 
-                if source == state.successor.addr {
-                    Response::QueryAll { source, data: current_data }
-                }
-                else {
-                    // Forward the response back to the original requester
-                    let request = Request::QueryAll { source, data: current_data };
+                if k <= 1 {
 
-                    // Forward to successor
-                    let successor = state.successor.clone();
-                    let response = self.send_request(successor.addr, request).await?;
+                    // Add own data to the response before forwarding
+                    let state = self.state.read().await;
+                    let own_data_clone = state.data.clone();
+                    let node_hash = hash_value(&self.info.addr.to_string());
+                    let mut current_data = data.clone();
+                    current_data.push((node_hash, own_data_clone));
+            
+                    if source == state.successor.addr {
+                        Response::QueryAll { source, data: current_data }
+                    }
+                    else {
+                        // Forward the response back to the original requester
+                        let request = Request::QueryAll { source, data: current_data };
 
-                    match response {
-                        Response::QueryAll { source: _, data } => {
-                            Response::QueryAll { source, data }
-                        }
-                        _ => {
-                            debug!("Failed to get response from successor during wildcard query");
-                            Response::QueryAll { source, data: vec![] }
+                        // Forward to successor
+                        let successor = state.successor.clone();
+                        let response = self.send_request(successor.addr, request).await?;
+
+                        match response {
+                            Response::QueryAll { source: _, data } => {
+                                Response::QueryAll { source, data }
+                            }
+                            _ => {
+                                debug!("Failed to get response from successor during wildcard query");
+                                Response::QueryAll { source, data: vec![] }
+                            }
                         }
                     }
+                } else if t == 0 {
+                    // Add own data to the response before forwarding
+                    let state = self.state.read().await;
+                    let data_clone = state.replicated_data.clone();
+
+                    let mut map = HashMap::new();
+                    let mut node_hash = self.info.id;
+                    for (k, (v, pos, node_info )) in data_clone {
+                        if pos == 1 {
+                            map.insert(k, v);
+                            node_hash = node_info.id;
+                        }
+                    }
+
+                    let mut current_data = data.clone();
+                    current_data.push((node_hash, map));
+
+                    if source == state.successor.addr {
+                        Response::QueryAll { source, data: current_data }
+                    }
+                    else {
+                        // Forward the response back to the original requester
+                        let request = Request::QueryAll { source, data: current_data };
+
+                        // Forward to successor
+                        let successor = state.successor.clone();
+                        let response = self.send_request(successor.addr, request).await?;
+
+                        match response {
+                            Response::QueryAll { source: _, data } => {
+                                Response::QueryAll { source, data }
+                            }
+                            _ => {
+                                debug!("Failed to get response from successor during wildcard query");
+                                Response::QueryAll { source, data: vec![] }
+                            }
+                        }
+                    }
+                } else {
+                    Response::Ok
                 }
+            
             },
 
             Request::Delete { key } => {
