@@ -53,6 +53,16 @@ pub enum Request {
 
     /// Request to update replicas on node departure (same input as UpdateReplicas)
     UpdateReplicasOnDepart { data: HashMap<String, String>, k_left: u64, startingNodeInfo: NodeInfo, replicated_data: HashMap<String, (String, u64, NodeInfo)> },
+
+    /// Request to insert a replica of a key-value pair
+    InsertReplica { key: String, value: String, node_info: NodeInfo, k_left: u64 },
+
+    /// Request to delete a replica of a key
+    DeleteReplica { key: String, node_info: NodeInfo, k_left: u64 },
+
+    /// Request to query the last replica in the chain for a key (used for linearizability)
+    QueryLastReplica { key: String, k_left: u64 },
+
 }
 
 /// Response messages sent between nodes

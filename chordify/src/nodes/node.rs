@@ -266,6 +266,24 @@ impl Node {
 
     /// Insert a key-value pair
     pub async fn insert(&self, key: String, value: String) -> anyhow::Result<()> {
+        if state.k <= 1 {
+            debug!("Inserting key '{}' with no replication", state.k);
+
+            insert_no_replication(self, key, value).await
+        }
+        else if state.t == 0 {
+            debug!("Inserting key '{}' with replication factor Linearizability");
+
+            insert_linearizability(self, key, value).await
+        }
+        else {
+            debug!("Inserting key '{}' with replication factor Eventual Consistency");
+
+            insert_eventual_consistency(self, key, value).await
+        }
+    }
+
+    pub async fn insert_no_replication(&self, key: String, value: String) -> anyhow::Result<()> {
         // Hash the key to find its identifier
         let key_hash = hash_value(&key);
 
@@ -306,9 +324,76 @@ impl Node {
         }
     }
 
+    pub async fn insert_linearizability(&self, key: String, value: String) -> anyhow::Result<()> {
+        // Hash the key to find its identifier
+        let key_hash = hash_value(&key);
+
+        debug!("Inserting key '{}' with hash {}", key, key_hash);
+
+        // If responsible node for the key is this node, store it locally
+        if self.is_responsible_for_hash(key_hash).await {
+            let mut state = self.state.write().await;
+
+            // Check if the key already exists and concat the values 
+            if let Some(existing_value) = state.data.get(&key) {
+                let new_value = format!("{}{}", existing_value, value);
+                state.data.insert(key.clone(), new_value);
+            } 
+            else { 
+                state.data.insert(key.clone(), value);
+                debug!("Stored key '{}' locally", key);
+            }
+
+            let request = Request::InsertReplica { key: key.clone(), value: value.clone(), node_info: self.info.clone(), k_left: state.k - 1 };
+            self.send_request_no_response(state.successor.addr, request).await?;
+
+            Ok(())
+        }
+        // Otherwise, forward to the appropriate node (successor or predecessor)
+        else {
+            let node_hash = self.info.id;
+            let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
+            else {key_hash - node_hash };
+            let request = Request::Insert { key, value };
+
+            // Forward to successor if it's closer, otherwise forward to predecessor
+            if forward_dist < (1 << (N - 1)){
+                let successor = self.state.read().await.successor.clone();
+                self.send_request_no_response(successor.addr, request).await?;
+            } else {
+                let predecessor = self.state.read().await.predecessor.clone();
+                self.send_request_no_response(predecessor.addr, request).await?;
+            }
+            Ok(())
+        }
+    }
+
+    insert_eventual_consistency() {
+        // For eventual consistency, we can just call the no replication insert and rely on the background replication to eventually propagate the value to replicas. 
+        // This means that the insert will return immediately after storing at the responsible node, without waiting for any replication acknowledgments.
+        // banana 
+    }
 
     /// Query function to retrieve a value by key
     pub async fn query(&self, key: String) -> Vec<(u64, Vec<String>)> {
+        if state.k <= 1 {
+            debug!("Querying key '{}' with no replication", state.k);
+
+            query_no_replication(self, key).await
+        }
+        else if state.t == 0 {
+            debug!("Querying key '{}' with replication factor Linearizability");
+
+            query_linearizability(self, key).await
+        }
+        else {
+            debug!("Querying key '{}' with replication factor Eventual Consistency");
+
+            query_eventual_consistency(self, key).await
+        }
+    }
+
+    pub async fn query_no_replication(&self, key: String) -> Vec<(u64, Vec<String>)> {
         // Hash the key to find its identifier
         let key_hash = hash_value(&key);
 
@@ -382,9 +467,121 @@ impl Node {
         }
     }
 
+    pub async fn query_linearizability(&self, key: String) -> Vec<(u64, Vec<String>)> {
+        // For linearizability, we can implement query similarly to insert with replication. 
+        // The responsible node retrieves the value locally and then sends a QueryReplica request to the successor to retrieve the replica, which forwards it along the replication chain until it reaches the end. 
+        // This way, the query will only return after all replicas have been retrieved, ensuring linearizability.
+        // banana
+
+        // Hash the key to find its identifier
+        let key_hash = hash_value(&key);
+
+        if key!="*" {
+            // If responsible node for the key is this node, retrieve it locally
+            if self.is_responsible_for_hash(key_hash).await {
+                // In linearizability we get the result from the last replica in the chain
+                let request = Request::QueryLastReplica { key, k_left: state.k - 1 };
+                let response = send_request(self.state.read().await.successor.addr, request).await?;
+
+                match response {
+                    Response::QueryResponse { source: _, value } => {
+                        let result = vec![(key_hash, value.map(|v| vec![v]).unwrap_or_else(Vec::new))];
+                        return result;
+                    }
+                    _ => {
+                        debug!("Failed to get response from successor during query");
+                        return vec![];
+                    }
+                }
+            }
+            // Otherwise, forward to the appropriate node (successor or predecessor)
+            else {
+                let node_hash = self.info.id;
+                let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
+                else {key_hash - node_hash };
+                let request = Request::Query { key, source: self.info.addr };
+                // we'll store the result of the forwarded request here; start with a successful placeholder
+                let mut response: anyhow::Result<Response> = Ok(Response::Ok);
+
+                // Forward to successor if it's closer, otherwise forward to predecessor
+                if forward_dist < (1 << (N - 1)) {
+                    let successor = self.state.read().await.successor.clone();
+                    response = self.send_request(successor.addr, request).await;
+                }
+                else {
+                    let predecessor = self.state.read().await.predecessor.clone();
+                    response = self.send_request(predecessor.addr, request).await;
+                }
+                
+                match response {
+                    Ok(Response::QueryResponse { source: _, value }) => {
+                        let result = vec![(key_hash, value.map(|v| vec![v]).unwrap_or_else(Vec::new))];
+                        return result;
+                    }
+                    _ => {
+                        debug!("Failed to get response from predecessor during query");
+                        return vec![];
+                    }
+                }
+            
+            }
+        
+        }
+        else {
+            // Handle wildcard query: retrieve all key-value pairs from this node and forward to successor/predecessor
+            let state = self.state.read().await;
+            let data_clone = state.data.clone();
+            drop(state); // Release the lock before sending
+
+            let node_hash = self.info.id;
+            let request = Request::QueryAll { source: self.info.addr, data: vec![(node_hash, data_clone)] };
+
+            // Forward to successor and predecessor
+            let successor = self.state.read().await.successor.clone();
+            let response = self.send_request(successor.addr, request.clone()).await;
+            match response {
+                Ok(Response::QueryAll { source: _, data }) => {
+                    let mut newvec = vec![];
+                    for (node_hash, kv_pairs) in data {
+                        let values = kv_pairs.into_iter().map(|(k,v)| format!("{}:{}", k, v)).collect();
+                        newvec.push((node_hash, values));
+                    }
+                    return newvec;
+                }
+                _ => {
+                    debug!("Failed to get response from successor during wildcard query");
+                    return vec![];
+                }
+            }
+        }
+    }
+
+    pub async fn query_eventual_consistency(&self, key: String) -> Vec<(u64, Vec<String>)> {
+        // For eventual consistency, we can just call the no replication query and rely on the background replication to eventually propagate the value to replicas. 
+        // This means that the query will return immediately after retrieving from the responsible node, without waiting for any replica responses.
+        // banana
+    }
 
     /// Delete a key-value pair
     pub async fn delete(&self, key: String) -> anyhow::Result<()> {
+        if state.k <= 1 {
+            debug!("Deleting key '{}' with no replication", state.k);
+
+            delete_no_replication(self, key).await
+        }
+        else if state.t == 0 {
+            debug!("Deleting key '{}' with replication factor Linearizability");
+
+            delete_linearizability(self, key).await
+        }
+        else {
+            debug!("Deleting key '{}' with replication factor Eventual Consistency");
+
+            delete_eventual_consistency(self, key).await
+        }
+    }
+
+    pub async fn delete_no_replication(&self, key: String) -> anyhow::Result<()> {
         // Hash the key to find its identifier
         let key_hash = hash_value(&key);
 
@@ -414,7 +611,53 @@ impl Node {
             }
             Ok(())
         }
-    
+    }
+
+    pub async fn delete_linearizability(&self, key: String) -> anyhow::Result<()> {
+        // For linearizability, we can implement delete similarly to insert with replication. 
+        // The responsible node deletes the key locally and then sends a DeleteReplica request to the successor to delete the replica, which forwards it along the replication chain until it reaches the end.
+        // This way, the delete will only return after all replicas have been deleted, ensuring linearizability.
+        // banana
+
+        // Hash the key to find its identifier
+        let key_hash = hash_value(&key);
+
+        debug!("Deleting key '{}' with hash {}", key, key_hash);
+
+        // If responsible node for the key is this node, delete it locally
+        if self.is_responsible_for_hash(key_hash).await {
+            let mut state = self.state.write().await;
+            state.data.remove(&key);
+            debug!("Deleted key '{}' locally", key);
+
+            let request = Request::DeleteReplica { key: key.clone(), node_info: self.info.clone(), k_left: state.k - 1 };
+            self.send_request_no_response(state.successor.addr, request).await?;
+
+            Ok(())
+        }
+        // Otherwise, forward to the appropriate node (successor or predecessor)
+        else {
+            let node_hash = self.info.id;
+            let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
+            else {key_hash - node_hash };
+            let request = Request::Delete { key };
+
+            // Forward to successor if it's closer, otherwise forward to predecessor
+            if forward_dist < (1 << (N - 1))  {
+                let successor = self.state.read().await.successor.clone();
+                self.send_request_no_response(successor.addr, request).await?;
+            } else {
+                let predecessor = self.state.read().await.predecessor.clone();
+                self.send_request_no_response(predecessor.addr, request).await?;
+            }
+            Ok(())
+        }
+    }
+
+    pub async fn delete_eventual_consistency(&self, key: String) -> anyhow::Result<()> {
+        // For eventual consistency, we can just call the no replication delete and rely on the background replication to eventually propagate the delete to replicas. 
+        // This means that the delete will return immediately after deleting at the responsible node, without waiting for any replication acknowledgments.
+        // banana
     }
 
 
@@ -481,6 +724,23 @@ impl Node {
                 }
             }
 
+            Request::InsertReplica { key, value, node_info, k_left } => {
+                let mut state = self.state.write().await;
+                state.replicated_data.insert(key.clone(), (value.clone(), k_left, node_info.clone()));
+
+                // Forward the replica to the successor if we still have replication hops left
+                if k_left > 1 {
+                    let request = Request::InsertReplica { key, value, node_info, k_left: k_left - 1 };
+                    let successor = state.successor.clone();
+                    self.send_request_no_response(successor.addr, request).await?;
+                }
+                else if k_left == 1 {
+                    debug!("Inserted replica for key '{}' at final replica node {}", key, self.info.addr);
+                }
+
+                Response::Ok
+            }
+
             Request::Query { key, source } => {
                 // Hash the key to find its identifier
                 let key_hash = hash_value(&key);
@@ -526,6 +786,32 @@ impl Node {
                 
             }
 
+            Request::QueryLastReplica { key, k_left } => {
+                if k_left != 1 {
+                    let request = Request::QueryLastReplica { key, k_left: k_left - 1 };
+                    let successor = self.state.read().await.successor.clone();
+                    let response = self.send_request(successor.addr, request).await?;
+
+                    match response {
+                        Response::QueryResponse { source: _, value } => {
+                            Response::QueryResponse { source: self.info.addr, value }
+                        }
+                        _ => {
+                            debug!("Failed to get response from successor during query");
+                            Response::QueryResponse { source: self.info.addr, value: None }
+                        }
+                    }
+                }
+                else {
+                    // This is the last replica in the chain, so return the value locally
+                    let state = self.state.read().await;
+                    let value = state.data.get(&key).cloned();
+                    drop(state);
+                    
+                    Response::QueryResponse { source: self.info.addr, value }
+                }
+            }
+
             Request::QueryAll { source, data } => {
 
                 // Add own data to the response before forwarding
@@ -556,13 +842,27 @@ impl Node {
                         }
                     }
                 }
-            }
+            },
 
             Request::Delete { key } => {
                 match self.delete(key).await {
                     Ok(()) => Response::Ok,
                     Err(e) => Response::Error(e.to_string()),
                 }
+            },
+
+            Request::DeleteReplica { key, node_info, k_left } => {
+                let mut state = self.state.write().await;
+                state.replicated_data.remove(&key);
+
+                // Forward the delete to the successor if we still have replication hops left
+                if k_left > 1 {
+                    let request = Request::DeleteReplica { key, node_info, k_left: k_left - 1 };
+                    let successor = state.successor.clone();
+                    self.send_request_no_response(successor.addr, request).await?;
+                }
+
+                Response::Ok
             },
 
             Request::TransferData { data } => {
