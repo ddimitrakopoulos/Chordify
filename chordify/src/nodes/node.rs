@@ -492,59 +492,6 @@ impl Node {
                 //Response::Ok
                 
             }
-
-            // Request::QueryResponse { source, value } => {
-            //     if source == self.info.addr {
-            //         println!("{:?}", value);
-            //         Response::Ok
-            //     } else {
-            //         // Forward the response back to the original requester
-            //         let request = Request::QueryResponse { source, value };
-            //         let source_hash = hash_value(&source.to_string());
-            //         let node_hash = hash_value(&self.info.addr.to_string());
-            //         let forward_dist = if node_hash >= source_hash {(1 << N) - node_hash + source_hash } 
-            //         else {source_hash - node_hash };
-
-            //         // Forward to successor if it's closer, otherwise forward to predecessor
-            //         if forward_dist < (1 << (N - 1)) {
-            //             let successor = self.state.read().await.successor.clone();
-            //             self.send_request_no_response(successor.addr, request).await?;
-            //         } else {
-            //             let predecessor = self.state.read().await.predecessor.clone();
-            //             self.send_request_no_response(predecessor.addr, request).await?;
-            //         }
-            //         Response::Ok
-            //     }
-            // }
-            
-            // Request::QueryAll { source, data } => {
-            //     if source == self.info.addr {
-            //         // This is the original requester, print all the data
-            //         for (node_hash, kv_pairs) in data {
-            //             println!("Data from node with hash {}: {:?}", node_hash, kv_pairs);
-            //         }
-            //         Response::Ok
-            //     } 
-            //     else {
-            //         // Forward the response back to the original requester
-
-            //         // Add own data to the response before forwarding
-            //         let state = self.state.read().await;
-            //         let own_data_clone = state.data.clone();
-            //         let node_hash = hash_value(&self.info.addr.to_string());
-            //         let mut current_data = data.clone();
-            //         current_data.push((node_hash, own_data_clone));
-
-            //         // Update the request with the new data
-            //         let request = Request::QueryAll { source, data: current_data };
-
-            //         // Forward to successor
-            //         let successor = self.state.read().await.successor.clone();
-            //         self.send_request_no_response(successor.addr, request).await?;
-
-            //         Response::Ok
-            //     }
-            // }
             
             Request::QueryAll { source, data } => {
 
