@@ -53,8 +53,8 @@ pub struct NodeState {
     predecessor: NodeInfo,
     // Local key-value storage
     data: HashMap<String, String>,
-    // Replicated data (song name, song value, replication position, hash node)
-    replicated_data: HashMap<String, (String, u64, u64)>,
+    // Replicated data (song name, song value, replication position, origin node info)
+    replicated_data: HashMap<String, (String, u64, NodeInfo)>,
     /// Replication factor
     k: u64,
     /// Replication type
@@ -584,30 +584,31 @@ impl Node {
             Request::UpdateReplicas { data, k_left } => {
                 let mut state = self.state.write().await;
 
-                // new hashmap<String, (String, u64, u64)>
-                let mut new_replicated_data: HashMap<String, (String, u64, u64)> = HashMap::new();
+                // new hashmap<String, (String, u64, NodeInfo)>
+                let mut new_replicated_data: HashMap<String, (String, u64, NodeInfo)> = HashMap::new();
 
-                let predecessor_id = state.predecessor.id;
+                let predecessor_info = state.predecessor.clone();
                 let successor_addr = state.successor.addr;
 
-                for (key, (value, replication_pos, node_hash)) in state.replicated_data.iter() {
+                for (key, (value, replication_pos, node_info)) in state.replicated_data.iter() {
                     if data.get(key).is_some_and(|v| v == value) {
                         // If it exists with the same value, keep as-is
-                        new_replicated_data.insert(key.clone(), (value.clone(), *replication_pos, *node_hash));
+                        new_replicated_data.insert(key.clone(), (value.clone(), *replication_pos, node_info.clone()));
                     } else {
                         // Otherwise decrement position and keep only if still > 0
                         if *replication_pos > 1 {
                             new_replicated_data.insert(
                                 key.clone(),
-                                (value.clone(), replication_pos - 1, *node_hash),
+                                (value.clone(), replication_pos - 1, node_info.clone()),
                             );
                         }
                     }
+                }
 
-                    if k_left == state.k - 1 {
-                        for (key, value) in data.iter() {
-                            new_replicated_data.insert(key.clone(), (value.clone(), k_left, predecessor_id));
-                        }
+                // First hop: add incoming data keys as fresh replicas at position k_left
+                if k_left == state.k - 1 {
+                    for (k, v) in data.iter() {
+                        new_replicated_data.insert(k.clone(), (v.clone(), k_left, predecessor_info.clone()));
                     }
                 }
 
