@@ -57,7 +57,7 @@ pub struct NodeState {
     replicated_data: HashMap<String, (String, u64, NodeInfo)>,
     /// Replication factor
     k: u64,
-    /// Replication type
+    /// Replication type (0 for linearizability, 1 for eventual consistency)
     t: u8,
 }
 
