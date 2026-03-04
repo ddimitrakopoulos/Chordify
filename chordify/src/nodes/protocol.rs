@@ -50,6 +50,9 @@ pub enum Request {
 
     /// Request to update replicas to new node
     UpdateReplicas { data: HashMap<String, String>, k_left: u64 },
+
+    /// Request to update replicas on node departure (same input as UpdateReplicas)
+    UpdateReplicasOnDepart { data: HashMap<String, String>, k_left: u64, startingNodeInfo: NodeInfo },
 }
 
 /// Response messages sent between nodes

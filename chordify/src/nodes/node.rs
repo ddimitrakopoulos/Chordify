@@ -223,6 +223,15 @@ impl Node {
             Response::DepartSuccess => {
                 // Clear local state
                 let mut state = self.state.write().await;
+
+                // Send UpdateReplicasOnDepart to successor to update replicas and transfer any new keys that should be replicated to the successor
+                let request = Request::UpdateReplicasOnDepart {
+                    data: state.data.clone(),
+                    k_left: state.k,
+                    startingNodeInfo: self.info.clone(),
+                };
+                self.send_request_no_response(state.successor.addr, request).await?;
+
                 state.successor = NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: 0 };
                 state.predecessor = NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: 0 };
                 state.data.clear();
@@ -619,6 +628,53 @@ impl Node {
                     let request = Request::UpdateReplicas {
                         data,
                         k_left: k_left - 1,
+                    };
+                    drop(state);
+                    self.send_request_no_response(successor_addr, request).await?;
+                }
+
+                Response::Ok
+            }
+
+
+            Request::UpdateReplicasOnDepart { data, k_left, startingNodeInfo } => {
+                let mut state = self.state.write().await;
+                let mut new_replicated_data: HashMap<String, (String, u64, NodeInfo)> = HashMap::new();
+                let successor_addr = state.successor.addr;
+                let k = state.k;
+
+                // First, process all keys in current replicated_data
+                for (key, (value, replication_pos, node_info)) in state.replicated_data.iter() {
+                    if data.get(key).is_some_and(|v| v == value) {
+                        // If present in incoming data with same value, keep as-is
+                        new_replicated_data.insert(key.clone(), (value.clone(), *replication_pos, node_info.clone()));
+                    } else {
+                        // Not present in incoming data: increment replication position
+                        let new_pos = replication_pos + 1;
+                        if new_pos < k {
+                            new_replicated_data.insert(
+                                key.clone(),
+                                (value.clone(), new_pos, node_info.clone()),
+                            );
+                        }
+                        // else: do not include if new_pos == k
+                    }
+                }
+
+                // Now, add any new keys from incoming data that are not already in replicated_data
+                for (key, value) in data.iter() {
+                    if !state.replicated_data.contains_key(key) {
+                        new_replicated_data.insert(key.clone(), (value.clone(), 1, startingNodeInfo.clone()));
+                    }
+                }
+
+                state.replicated_data = new_replicated_data;
+
+                if k_left > 0 {
+                    let request = Request::UpdateReplicasOnDepart {
+                        data,
+                        k_left: k_left - 1,
+                        startingNodeInfo,
                     };
                     drop(state);
                     self.send_request_no_response(successor_addr, request).await?;
