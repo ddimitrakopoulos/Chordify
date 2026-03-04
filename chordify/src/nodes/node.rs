@@ -266,20 +266,20 @@ impl Node {
 
     /// Insert a key-value pair
     pub async fn insert(&self, key: String, value: String) -> anyhow::Result<()> {
-        if state.k <= 1 {
-            debug!("Inserting key '{}' with no replication", state.k);
+        let state = self.state.read().await;
+        let k = state.k;
+        let t = state.t;
+        drop(state);
 
-            insert_no_replication(self, key, value).await
-        }
-        else if state.t == 0 {
-            debug!("Inserting key '{}' with replication factor Linearizability");
-
-            insert_linearizability(self, key, value).await
-        }
-        else {
-            debug!("Inserting key '{}' with replication factor Eventual Consistency");
-
-            insert_eventual_consistency(self, key, value).await
+        if k <= 1 {
+            debug!("Inserting key '{}' with no replication", key);
+            self.insert_no_replication(key, value).await
+        } else if t == 0 {
+            debug!("Inserting key '{}' with replication factor Linearizability", key);
+            self.insert_linearizability(key, value).await
+        } else {
+            debug!("Inserting key '{}' with replication factor Eventual Consistency", key);
+            self.insert_eventual_consistency(key, value).await
         }
     }
 
@@ -338,13 +338,18 @@ impl Node {
             if let Some(existing_value) = state.data.get(&key) {
                 let new_value = format!("{}{}", existing_value, value);
                 state.data.insert(key.clone(), new_value);
-            } 
-            else { 
-                state.data.insert(key.clone(), value);
+            } else {
+                // clone because we also need value for replica request
+                state.data.insert(key.clone(), value.clone());
                 debug!("Stored key '{}' locally", key);
             }
 
-            let request = Request::InsertReplica { key: key.clone(), value: value.clone(), node_info: self.info.clone(), k_left: state.k - 1 };
+            let request = Request::InsertReplica {
+                key: key.clone(),
+                value: value.clone(),
+                node_info: self.info.clone(),
+                k_left: state.k - 1,
+            };
             self.send_request_no_response(state.successor.addr, request).await?;
 
             Ok(())
@@ -368,28 +373,29 @@ impl Node {
         }
     }
 
-    insert_eventual_consistency() {
-        // For eventual consistency, we can just call the no replication insert and rely on the background replication to eventually propagate the value to replicas. 
-        // This means that the insert will return immediately after storing at the responsible node, without waiting for any replication acknowledgments.
-        // banana 
+    /// Stub for eventual consistency insert.
+    pub async fn insert_eventual_consistency(&self, key: String, value: String) -> anyhow::Result<()> {
+        // For eventual consistency, we can just call the no replication insert and rely on
+        // background replication to eventually propagate the value to replicas.
+        self.insert_no_replication(key, value).await
     }
 
     /// Query function to retrieve a value by key
     pub async fn query(&self, key: String) -> Vec<(u64, Vec<String>)> {
-        if state.k <= 1 {
-            debug!("Querying key '{}' with no replication", state.k);
+        let state = self.state.read().await;
+        let k = state.k;
+        let t = state.t;
+        drop(state);
 
-            query_no_replication(self, key).await
-        }
-        else if state.t == 0 {
-            debug!("Querying key '{}' with replication factor Linearizability");
-
-            query_linearizability(self, key).await
-        }
-        else {
-            debug!("Querying key '{}' with replication factor Eventual Consistency");
-
-            query_eventual_consistency(self, key).await
+        if k <= 1 {
+            debug!("Querying key '{}' with no replication", key);
+            self.query_no_replication(key).await
+        } else if t == 0 {
+            debug!("Querying key '{}' with replication factor Linearizability", key);
+            self.query_linearizability(key).await
+        } else {
+            debug!("Querying key '{}' with replication factor Eventual Consistency", key);
+            self.query_eventual_consistency(key).await
         }
     }
 
@@ -468,29 +474,27 @@ impl Node {
     }
 
     pub async fn query_linearizability(&self, key: String) -> Vec<(u64, Vec<String>)> {
-        // For linearizability, we can implement query similarly to insert with replication. 
-        // The responsible node retrieves the value locally and then sends a QueryReplica request to the successor to retrieve the replica, which forwards it along the replication chain until it reaches the end. 
-        // This way, the query will only return after all replicas have been retrieved, ensuring linearizability.
-        // banana
-
         // Hash the key to find its identifier
         let key_hash = hash_value(&key);
 
-        if key!="*" {
-            // If responsible node for the key is this node, retrieve it locally
+        if key != "*" {
             if self.is_responsible_for_hash(key_hash).await {
-                // In linearizability we get the result from the last replica in the chain
-                let request = Request::QueryLastReplica { key, k_left: state.k - 1 };
-                let response = send_request(self.state.read().await.successor.addr, request).await?;
+                // In linearizability we get the result from the last replica in the chain.
+                let (successor_addr, k) = {
+                    let state = self.state.read().await;
+                    (state.successor.addr, state.k)
+                };
+
+                let request = Request::QueryLastReplica { key, k_left: k - 1 };
+                let response = self.send_request(successor_addr, request).await;
 
                 match response {
-                    Response::QueryResponse { source: _, value } => {
-                        let result = vec![(key_hash, value.map(|v| vec![v]).unwrap_or_else(Vec::new))];
-                        return result;
+                    Ok(Response::QueryResponse { source: _, value }) => {
+                        vec![(key_hash, value.map(|v| vec![v]).unwrap_or_else(Vec::new))]
                     }
                     _ => {
                         debug!("Failed to get response from successor during query");
-                        return vec![];
+                        vec![]
                     }
                 }
             }
@@ -523,7 +527,6 @@ impl Node {
                         return vec![];
                     }
                 }
-            
             }
         
         }
@@ -557,27 +560,26 @@ impl Node {
     }
 
     pub async fn query_eventual_consistency(&self, key: String) -> Vec<(u64, Vec<String>)> {
-        // For eventual consistency, we can just call the no replication query and rely on the background replication to eventually propagate the value to replicas. 
-        // This means that the query will return immediately after retrieving from the responsible node, without waiting for any replica responses.
-        // banana
+        // For eventual consistency we can return a best-effort value from the responsible node.
+        self.query_no_replication(key).await
     }
 
     /// Delete a key-value pair
     pub async fn delete(&self, key: String) -> anyhow::Result<()> {
-        if state.k <= 1 {
-            debug!("Deleting key '{}' with no replication", state.k);
+        let state = self.state.read().await;
+        let k = state.k;
+        let t = state.t;
+        drop(state);
 
-            delete_no_replication(self, key).await
-        }
-        else if state.t == 0 {
-            debug!("Deleting key '{}' with replication factor Linearizability");
-
-            delete_linearizability(self, key).await
-        }
-        else {
-            debug!("Deleting key '{}' with replication factor Eventual Consistency");
-
-            delete_eventual_consistency(self, key).await
+        if k <= 1 {
+            debug!("Deleting key '{}' with no replication", key);
+            self.delete_no_replication(key).await
+        } else if t == 0 {
+            debug!("Deleting key '{}' with replication factor Linearizability", key);
+            self.delete_linearizability(key).await
+        } else {
+            debug!("Deleting key '{}' with replication factor Eventual Consistency", key);
+            self.delete_eventual_consistency(key).await
         }
     }
 
@@ -655,9 +657,9 @@ impl Node {
     }
 
     pub async fn delete_eventual_consistency(&self, key: String) -> anyhow::Result<()> {
-        // For eventual consistency, we can just call the no replication delete and rely on the background replication to eventually propagate the delete to replicas. 
-        // This means that the delete will return immediately after deleting at the responsible node, without waiting for any replication acknowledgments.
-        // banana
+        // For eventual consistency, delete at the responsible node and rely on background
+        // mechanisms to propagate the delete.
+        self.delete_no_replication(key).await
     }
 
 
