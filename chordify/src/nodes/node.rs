@@ -526,38 +526,12 @@ impl Node {
             let response = self.send_request(successor.addr, request.clone()).await;
             match response {
                 Ok(Response::QueryAll { source: _, data }) => {
-                    // Count occurrences of each node hash
-                    let mut node_counts: HashMap<u64, usize> = HashMap::new();
-                    for (node_hash, _) in &data {
-                        *node_counts.entry(*node_hash).or_insert(0) += 1;
-                    }
-
-                    // For node hashes that appear multiple times, keep the entry with the most keys
-                    let mut best_by_node: HashMap<u64, Vec<String>> = HashMap::new();
-
+                    let mut newvec = vec![];
                     for (node_hash, kv_pairs) in data {
-                        let values: Vec<String> = kv_pairs
-                            .into_iter()
-                            .map(|(k, v)| format!("{}:{}", k, v))
-                            .collect();
-
-                        // If this node hash appears only once, add it directly
-                        if node_counts.get(&node_hash).copied().unwrap_or(0) == 1 {
-                            best_by_node.insert(node_hash, values);
-                        } else {
-                            // Multiple entries for this node hash - keep the one with most keys
-                            let should_replace = match best_by_node.get(&node_hash) {
-                                Some(existing) => values.len() > existing.len(),
-                                None => true,
-                            };
-
-                            if should_replace {
-                                best_by_node.insert(node_hash, values);
-                            }
-                        }
+                        let values = kv_pairs.into_iter().map(|(k,v)| format!("{}:{}", k, v)).collect();
+                        newvec.push((node_hash, values));
                     }
-
-                    return best_by_node.into_iter().collect();
+                    return newvec;
                 }
                 _ => {
                     debug!("Failed to get response from successor during wildcard query");
@@ -566,6 +540,7 @@ impl Node {
             }
         }
     }
+
 
     pub async fn query_linearizability(&self, key: String) -> Vec<(u64, Vec<String>)> {
         // Hash the key to find its identifier
