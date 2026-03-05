@@ -333,20 +333,22 @@ impl Node {
         // If responsible node for the key is this node, store it locally
         if self.is_responsible_for_hash(key_hash).await {
             let mut state = self.state.write().await;
+            // Start with the incoming value and update if the key already exists.
+            let mut new_value = value.clone();
 
-            // Check if the key already exists and concat the values 
             if let Some(existing_value) = state.data.get(&key) {
-                let new_value = format!("{}{}", existing_value, value);
-                state.data.insert(key.clone(), new_value);
-            } else {
-                // clone because we also need value for replica request
-                state.data.insert(key.clone(), value.clone());
-                debug!("Stored key '{}' locally", key);
+                // concatenate on existing data
+                new_value = format!("{}{}", existing_value, value);
             }
+
+            // insert/update using a clone so `new_value` remains available for
+            // the replica request below
+            state.data.insert(key.clone(), new_value.clone());
+            debug!("Stored key '{}' locally", key);
 
             let request = Request::InsertReplica {
                 key: key.clone(),
-                value: value.clone(),
+                value: new_value,
                 node_info: self.info.clone(),
                 k_left: state.k - 1,
             };
@@ -862,6 +864,7 @@ impl Node {
 
                     match response {
                         Response::QueryResponse { source: _, value } => {
+                            debug!("Received response from successor during query: {:?}", value);
                             Response::QueryResponse { source: self.info.addr, value }
                         }
                         _ => {
