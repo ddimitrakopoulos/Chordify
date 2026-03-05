@@ -43,6 +43,8 @@ pub struct Node {
     state: Arc<RwLock<NodeState>>,
     // Bootstrap node address (required for join/depart)
     bootstrap_addr: SocketAddr,
+    // Server instance for handling shutdown
+    server: Option<Server>,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -94,7 +96,8 @@ impl Node {
                 k: 1,
                 t: 0,
             })),
-            bootstrap_addr   
+            bootstrap_addr,
+            server: None,
         }
     }
 
@@ -148,7 +151,8 @@ impl Node {
     // 1. Change `&self` to `self: Arc<Self>`
     pub async fn run(self: Arc<Self>) -> anyhow::Result<()> {
         let server = Server::bind(self.info.addr).await?;
-        
+        self.server = Some(server);
+
         // 2. Now `self` IS an Arc<Node>, so we can clone it!
         // This creates our owned Arc pointer for the outer closure.
         let node_owned = Arc::clone(&self); 
@@ -162,6 +166,14 @@ impl Node {
                 node_inner.handle_request(request_bytes, from).await 
             }
         }).await
+    }
+
+    pub async fn stop(self) -> anyhow::Result<()> {
+        if let Some(server) = self.server.take() {
+            server.unbind().await?;
+            info!("Server at {} stopped", self.info.addr);
+        }
+        Ok(())
     }
 
 
@@ -240,6 +252,9 @@ impl Node {
                 state.predecessor = NodeInfo { addr: SocketAddr::new("0.0.0.0".parse().unwrap(), 0), id: 0 };
                 state.data.clear();
                 
+                // The last thing to do is stop the server by unbinding the listener, which will allow the node to fully shut down and free the port.
+                self.stop().await?;
+
                 info!("Departed ring via bootstrap");
                 Ok(())
             }

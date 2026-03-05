@@ -60,6 +60,14 @@ impl Server {
         Ok(Self { listener, addr: bound_addr }) // Return the successfully initialized Server instance with the listener and its bound address
     }
 
+    // Shut down the TcpListener by dropping it. This will close the socket and unbind it from the address,
+    //  allowing other processes to bind to the same address/port in the future.
+    pub async fn unbind(self) -> anyhow::Result<()> {#
+        drop(self.listener); // Dropping the listener will close the socket and unbind it from the address
+        info!("Server unbound from {}", self.addr);
+        Ok(())
+    }
+
     /// Get this server's bound address.
     pub fn get_addr(&self) -> SocketAddr {
         self.addr
@@ -82,6 +90,8 @@ impl Server {
         let handler = Arc::new(handler);
 
         // Accept incoming connections in a loop. For each connection, spawn a new task to handle it concurrently.
+        // We need to exit the loop if the listener is closed (e.g. by unbind), which will cause accept() to return an error.
+        // In that case, we can break the loop and stop the server.
         loop {
             match self.listener.accept().await {
                 Ok((stream, client_addr)) => {
@@ -101,6 +111,7 @@ impl Server {
                 Err(e) => {
                     error!("Failed to accept connection: {}", e);
                     // Optionally, break or return Err if fatal error
+                    break;
                 }
             }
         }
