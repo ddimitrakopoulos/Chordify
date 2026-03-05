@@ -63,6 +63,9 @@ pub enum Request {
     /// Request to query the last replica in the chain for a key (used for linearizability)
     QueryLastReplica { key: String, k_left: u64 },
 
+    /// Request to print the topology of the ring
+    Overlay,
+
 }
 
 /// Response messages sent between nodes
@@ -99,6 +102,9 @@ pub enum Response {
     
     /// Depart acknowledged - node can now shut down
     DepartSuccess,
+
+    /// Response to Overlay request - includes the topology information
+    OverlayResponse { topology: Vec<(u64, SocketAddr)> },
 }
 
 impl Request {

@@ -918,6 +918,19 @@ impl Node {
     }
 
 
+    pub async fn overlay(&self) -> Vec<(u64, SocketAddr)> {
+        let request = Request::Overlay;
+        let response = self.send_request(self.bootstrap_addr, request).await;
+
+        match response {
+            Ok(Response::OverlayResponse { topology }) => topology,
+            _ => {
+                debug!("Failed to get overlay response from bootstrap");
+                vec![]
+            }
+        }
+    }
+
     /// Handle an incoming request
     async fn handle_request(&self, request_bytes: Vec<u8>, from: SocketAddr)
     -> anyhow::Result<Vec<u8>> {

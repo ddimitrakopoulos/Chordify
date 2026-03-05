@@ -125,6 +125,18 @@ fn main() -> anyhow::Result<()> {
                             println!("usage: delete <key>");
                         }
                     }
+                    "overlay" => {
+                        // print the current ring topology as seen by the bootstrap
+                        let topo = rt.block_on(command_node.overlay());
+                        if topo.is_empty() {
+                            println!("overlay request failed or ring is empty");
+                        } else {
+                            println!("ring topology (id -> addr):");
+                            for (id, addr) in topo {
+                                println!("  {} -> {}", id, addr);
+                            }
+                        }
+                    }
                     "depart" => {
                         if let Some(bs) = bs_for_cmd {
                             rt.block_on(command_node.depart(bs)).ok();

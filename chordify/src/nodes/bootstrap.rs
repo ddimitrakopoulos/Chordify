@@ -125,6 +125,13 @@ impl BootstrapNode {
                     }
                 }
             }
+
+            Request::Overlay => {
+                // Return the topology of the ring (for debugging)
+                let members = self.ring_members.read().await;
+                let topology = members.iter().map(|m| (m.id, m.addr)).collect();
+                Response::OverlayResponse { topology }
+            }
             
             // default case for unrecognized requests
             _ => {
