@@ -20,8 +20,30 @@ use tracing_subscriber::FmtSubscriber;
 use chordify::nodes::Node;
 use chordify::BootstrapNode;
 
+mod cli;
+
 fn main() {
-    println!("This binary is no longer used. Please run `cargo test` to execute the tests instead.");
+
+    //let addr: SocketAddr = "127.0.0.1:8001".parse().expect("invalid address");
+    //let bs_addr: SocketAddr = "127.0.0.1:8000".parse().expect("invalid bootstrap address");
+
+    //let node = Arc::new(Node::new(addr, bs_addr));
+
+    let node = cli::init().expect("failed to initialize node");
+
+    cli::run(node);
+    // match node {
+    //     Ok(n) => {
+    //         cli::run(n);
+    //     },
+    //     _ => {}
+    // }
+
+    //println!("This is the main");
+    //println!("Node address: {}", addr);
+
+
+    //cli::run(node);
 }
 
 // fn main() -> anyhow::Result<()> {
@@ -70,6 +92,16 @@ fn main() {
 //                 }
 //             });
 //         });
+
+//         // command thread
+//         let bs_for_cmd = bootstrap_arg.clone();
+//         let cmds = thread::spawn(move || {
+//             let rt = tokio::runtime::Runtime::new().expect("runtime");
+//             cli::run(command_node);
+//         });
+
+//         cmds.join().expect("command thread panicked");
+
 //     } else {
 //         // bootstrap node: create both a BootstrapNode (for network) and an
 //         // `Arc<Node>` for the command loop.  We don't need the bootstrap
@@ -86,76 +118,6 @@ fn main() {
 //         });
 //     }
 
-//     // command thread
-//     let bs_for_cmd = bootstrap_arg.clone();
-//     let cmds = thread::spawn(move || {
-//         let rt = tokio::runtime::Runtime::new().expect("runtime");
-//         let stdin = io::stdin();
-//         for line in stdin.lock().lines() {
-//             let line = match line { Ok(l) => l, Err(_) => break };
-//             let mut parts = line.trim().split_whitespace();
-//             if let Some(cmd) = parts.next() {
-//                 match cmd {
-//                     "insert" => {
-//                         if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
-//                             rt.block_on(command_node.insert(k.to_string(), v.to_string())).ok();
-//                         } else {
-//                             println!("usage: insert <key> <value>");
-//                         }
-//                     }
-//                     "query" => {
-//                         if let Some(k) = parts.next() {
-//                             // the query function returns a vector of (hash, values)
-//                             let results = rt.block_on(command_node.query(k.to_string()));
-//                             if results.is_empty() {
-//                                 println!("no entries found");
-//                             } else {
-//                                 for (hash, vals) in results {
-//                                     if vals.is_empty() {
-//                                         println!("key hash {}: <none>", hash);
-//                                     } else {
-//                                         println!("key hash {}: {}", hash, vals.join(", "));
-//                                     }
-//                                 }
-//                             }
-//                         } else {
-//                             println!("usage: query <key>");
-//                         }
-//                     }
-//                     "delete" => {
-//                         if let Some(k) = parts.next() {
-//                             rt.block_on(command_node.delete(k.to_string())).ok();
-//                         } else {
-//                             println!("usage: delete <key>");
-//                         }
-//                     }
-//                     "overlay" => {
-//                         // print the current ring topology as seen by the bootstrap
-//                         let topo = rt.block_on(command_node.overlay());
-//                         if topo.is_empty() {
-//                             println!("overlay request failed or ring is empty");
-//                         } else {
-//                             println!("ring topology (id -> addr):");
-//                             for (id, addr) in topo {
-//                                 println!("  {} -> {}", id, addr);
-//                             }
-//                         }
-//                     }
-//                     "depart" => {
-//                         if let Some(bs) = bs_for_cmd {
-//                             rt.block_on(command_node.depart(bs)).ok();
-//                         } else {
-//                             println!("bootstrap node cannot depart");
-//                         }
-//                     }
-//                     "exit" | "quit" => break,
-//                     _ => println!("unknown command '{}'", cmd),
-//                 }
-//             }
-//         }
-//     });
-
-//     cmds.join().expect("command thread panicked");
 //     network_handle.join().expect("network thread panicked");
 
 //     Ok(())
