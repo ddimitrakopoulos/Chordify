@@ -164,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
         .context("failed to init tracing subscriber")?;
 
     let args = Args::parse();
+    let out_path = args.out.clone();
 
     let contents = fs::read_to_string(&args.requests)
         .with_context(|| format!("failed to read requests file: {}", args.requests.display()))?;
@@ -178,38 +179,22 @@ async fn main() -> anyhow::Result<()> {
     let node = start_client_node(args.addr, args.bootstrap).await?;
     tokio::time::sleep(Duration::from_millis(args.join_grace_ms)).await;
 
-    // Infer (best-effort) replication mode from wildcard query output.
-    // - In eventual consistency (t=1) or no-replication, `query('*')` returns actual key/value pairs per node.
-    // - In linearizability (t=0) implementation in this project, `query('*')` often includes per-node empty placeholders.
-    // This is heuristic, but it lets us avoid touching the node implementation.
-    let wildcard = node.query("*".to_string()).await;
-
-    // Infer t:
-    // if we see any entry that is an empty placeholder, treat as linearizability.
-    let inferred_t = if wildcard.iter().any(|(_, vals)| vals.is_empty()) {
-        0u8
-    } else {
-        1u8
-    };
-
-    let (mode_name, out_path) = match inferred_t {
-        0 => ("linearizability (t=0)", args.out.clone()),
-        1 => ("eventual consistency (t=1)", args.out.clone()),
-        _ => unreachable!(),
-    };
-
-    info!("Detected mode: {mode_name}; writing query answers to {}", out_path.display());
-
     let mut out = String::new();
-    out.push_str(&format!("mode: {mode_name}\n"));
-    out.push('\n');
 
     for (idx, op) in ops.iter().enumerate() {
         match op {
             Op::Insert { key, value } => {
+                // Record the operation so inserts are visible in the output file.
+                out.push_str(&format!(
+                    "op {}: insert '{}' '{}'\n\n",
+                    idx + 1,
+                    key,
+                    value
+                ));
+
                 node.insert(key.clone(), value.clone())
                     .await
-                    .with_context(|| format!("{mode_name}: insert failed at op {}", idx + 1))?;
+                    .with_context(|| format!("insert failed at op {}", idx + 1))?;
             }
             Op::Query { key } => {
                 let res = node.query(key.clone()).await;
