@@ -23,7 +23,7 @@ use chordify::BootstrapNode;
 fn main() -> anyhow::Result<()> {
     // logging
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::WARN)
+        .with_max_level(Level::DEBUG)
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
