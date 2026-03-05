@@ -20,6 +20,40 @@ use tracing_subscriber::FmtSubscriber;
 use chordify::nodes::Node;
 use chordify::BootstrapNode;
 
+/// Split a CLI line into whitespace-delimited tokens, but keep quoted strings intact.
+///
+/// Examples:
+/// - `insert "hello there" "oh hi"` -> ["insert", "hello there", "oh hi"]
+/// - `query "hello there"` -> ["query", "hello there"]
+///
+/// Notes:
+/// - Only double quotes are supported.
+/// - Backslash escaping is not supported.
+fn split_cli_args(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+
+    for ch in line.chars() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            c if c.is_whitespace() && !in_quotes => {
+                if !cur.is_empty() {
+                    out.push(cur.clone());
+                    cur.clear();
+                }
+            }
+            _ => cur.push(ch),
+        }
+    }
+
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+
+    out
+}
+
 fn main() -> anyhow::Result<()> {
     // logging
     let subscriber = FmtSubscriber::builder()
@@ -169,86 +203,94 @@ fn main() -> anyhow::Result<()> {
             println!("Chordify CLI ready. Type 'help' for commands.");
             for line in stdin.lock().lines() {
                 let line = match line { Ok(l) => l, Err(_) => break };
-                let mut parts = line.trim().split_whitespace();
-                if let Some(cmd) = parts.next() {
-                    match cmd {
-                        "insert" => {
-                            if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
-                                println!("Inserting key '{}' with value '{}'...", k, v);
-                                match rt.block_on(command_node.insert(k.to_string(), v.to_string())) {
-                                    Ok(_) => println!("Insert successful."),
-                                    Err(e) => println!("Insert failed: {}", e),
-                                }
-                            } else {
-                                println!("usage: insert <key> <value>");
+
+                let tokens = split_cli_args(line.trim());
+                if tokens.is_empty() {
+                    continue;
+                }
+
+                let cmd = tokens[0].as_str();
+                match cmd {
+                    "insert" => {
+                        if tokens.len() >= 3 {
+                            let k = &tokens[1];
+                            let v = &tokens[2];
+                            println!("Inserting key '{}' with value '{}'...", k, v);
+                            match rt.block_on(command_node.insert(k.to_string(), v.to_string())) {
+                                Ok(_) => println!("Insert successful."),
+                                Err(e) => println!("Insert failed: {}", e),
                             }
+                        } else {
+                            println!("usage: insert <key> <value>  (use double quotes for spaces)");
                         }
-                        "query" => {
-                            if let Some(k) = parts.next() {
-                                // Allow wildcard query "*" to fetch all keys
-                                println!("Querying key '{}'...", k);
-                                let results = rt.block_on(command_node.query(k.to_string()));
-                                if results.is_empty() {
-                                    println!("no entries found");
-                                } else {
-                                    for (hash, vals) in results {
-                                        if vals.is_empty() {
-                                            println!("key hash {}: <none>", hash);
-                                        } else {
-                                            println!("key hash {}: {}", hash, vals.join(", "));
-                                        }
+                    }
+                    "query" => {
+                        if tokens.len() >= 2 {
+                            let k = &tokens[1];
+                            // Allow wildcard query "*" to fetch all keys
+                            println!("Querying key '{}'...", k);
+                            let results = rt.block_on(command_node.query(k.to_string()));
+                            if results.is_empty() {
+                                println!("no entries found");
+                            } else {
+                                for (hash, vals) in results {
+                                    if vals.is_empty() {
+                                        println!("key hash {}: <none>", hash);
+                                    } else {
+                                        println!("key hash {}: {}", hash, vals.join(", "));
                                     }
                                 }
-                            } else {
-                                println!("usage: query <key|*>");
                             }
+                        } else {
+                            println!("usage: query <key|*>  (use double quotes for spaces)");
                         }
-                        "delete" => {
-                            if let Some(k) = parts.next() {
-                                println!("Deleting key '{}'...", k);
-                                match rt.block_on(command_node.delete(k.to_string())) {
-                                    Ok(_) => println!("Delete successful."),
-                                    Err(e) => println!("Delete failed: {}", e),
-                                }
-                            } else {
-                                println!("usage: delete <key>");
-                            }
-                        }
-                        "overlay" => {
-                            println!("Requesting ring topology...");
-                            let topo = rt.block_on(command_node.overlay());
-                            if topo.is_empty() {
-                                println!("overlay request failed or ring is empty");
-                            } else {
-                                println!("ring topology (id -> addr):");
-                                for (id, addr) in topo {
-                                    println!("  {} -> {}", id, addr);
-                                }
-                            }
-                        }
-                        "depart" => {
-                            if let Some(bs) = bs_for_cmd {
-                                println!("Departing from ring via bootstrap at {}...", bs);
-                                match rt.block_on(command_node.depart(bs)) {
-                                    Ok(_) => println!("Departed from ring."),
-                                    Err(e) => println!("Depart failed: {}", e),
-                                }
-                            } else {
-                                println!("bootstrap node cannot depart");
-                            }
-                            std::process::exit(1);
-                        }
-                        "help" => {
-                            println!("\nChordify CLI Commands:");
-                            println!("  help                 - Show this help message");
-                            println!("  insert <key> <value> - Insert a key-value pair");
-                            println!("  delete <key>         - Delete a key");
-                            println!("  query <key|*>        - Query a key or all keys (use *)");
-                            println!("  depart               - Depart from the ring");
-                            println!("  overlay              - Print ring topology");
-                        }
-                        _ => println!("unknown command '{}'", cmd),
                     }
+                    "delete" => {
+                        if tokens.len() >= 2 {
+                            let k = &tokens[1];
+                            println!("Deleting key '{}'...", k);
+                            match rt.block_on(command_node.delete(k.to_string())) {
+                                Ok(_) => println!("Delete successful."),
+                                Err(e) => println!("Delete failed: {}", e),
+                            }
+                        } else {
+                            println!("usage: delete <key>  (use double quotes for spaces)");
+                        }
+                    }
+                    "overlay" => {
+                        println!("Requesting ring topology...");
+                        let topo = rt.block_on(command_node.overlay());
+                        if topo.is_empty() {
+                            println!("overlay request failed or ring is empty");
+                        } else {
+                            println!("ring topology (id -> addr):");
+                            for (id, addr) in topo {
+                                println!("  {} -> {}", id, addr);
+                            }
+                        }
+                    }
+                    "depart" => {
+                        if let Some(bs) = bs_for_cmd {
+                            println!("Departing from ring via bootstrap at {}...", bs);
+                            match rt.block_on(command_node.depart(bs)) {
+                                Ok(_) => println!("Departed from ring."),
+                                Err(e) => println!("Depart failed: {}", e),
+                            }
+                        } else {
+                            println!("bootstrap node cannot depart");
+                        }
+                        std::process::exit(1);
+                    }
+                    "help" => {
+                        println!("\nChordify CLI Commands:");
+                        println!("  help                          - Show this help message");
+                        println!("  insert <key> <value>          - Insert a key-value pair (quote fields with spaces)");
+                        println!("  delete <key>                  - Delete a key (quote key with spaces)");
+                        println!("  query <key|*>                 - Query a key or all keys (use *); quote key with spaces");
+                        println!("  depart                        - Depart from the ring");
+                        println!("  overlay                       - Print ring topology");
+                    }
+                    _ => println!("unknown command '{}'", cmd),
                 }
             }
         });
