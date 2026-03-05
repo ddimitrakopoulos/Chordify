@@ -44,6 +44,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 // ============================================================================
 
 /// A Server that listens for incoming TCP connections and handles requests using a provided handler function.
+#[derive(Debug)]
 pub struct Server {
     listener: TcpListener,
     addr: SocketAddr,
@@ -62,7 +63,7 @@ impl Server {
 
     // Shut down the TcpListener by dropping it. This will close the socket and unbind it from the address,
     //  allowing other processes to bind to the same address/port in the future.
-    pub async fn unbind(self) -> anyhow::Result<()> {#
+    pub async fn unbind(self) -> anyhow::Result<()> {
         drop(self.listener); // Dropping the listener will close the socket and unbind it from the address
         info!("Server unbound from {}", self.addr);
         Ok(())
@@ -115,6 +116,7 @@ impl Server {
                 }
             }
         }
+        Ok(())
     }
 }
 

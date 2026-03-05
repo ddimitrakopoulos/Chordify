@@ -44,7 +44,7 @@ pub struct Node {
     // Bootstrap node address (required for join/depart)
     bootstrap_addr: SocketAddr,
     // Server instance for handling shutdown
-    server: Option<Server>,
+    server: Arc<RwLock<Option<Server>>>,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -97,7 +97,7 @@ impl Node {
                 t: 0,
             })),
             bootstrap_addr,
-            server: None,
+            server: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -151,12 +151,17 @@ impl Node {
     // 1. Change `&self` to `self: Arc<Self>`
     pub async fn run(self: Arc<Self>) -> anyhow::Result<()> {
         let server = Server::bind(self.info.addr).await?;
-        self.server = Some(server);
+        {
+            let mut server_lock = self.server.write().await; // Acquire write lock
+            *server_lock = Some(server);
+            drop(server_lock); // Release the lock before starting to listen
+        }
 
         // 2. Now `self` IS an Arc<Node>, so we can clone it!
         // This creates our owned Arc pointer for the outer closure.
         let node_owned = Arc::clone(&self); 
 
+        let server = Server::bind(self.info.addr).await?;
         server.listen(move |request_bytes, from| {
             
             // 3. Clone it again for the inner async block
@@ -168,8 +173,9 @@ impl Node {
         }).await
     }
 
-    pub async fn stop(self) -> anyhow::Result<()> {
-        if let Some(server) = self.server.take() {
+    pub async fn stop(&self) -> anyhow::Result<()> {
+        let mut server_lock = self.server.write().await; // Acquire write lock
+        if let Some(server) = server_lock.take() {
             server.unbind().await?;
             info!("Server at {} stopped", self.info.addr);
         }
