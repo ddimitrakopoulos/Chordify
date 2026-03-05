@@ -460,12 +460,38 @@ impl Node {
             let response = self.send_request(successor.addr, request.clone()).await;
             match response {
                 Ok(Response::QueryAll { source: _, data }) => {
-                    let mut newvec = vec![];
-                    for (node_hash, kv_pairs) in data {
-                        let values = kv_pairs.into_iter().map(|(k,v)| format!("{}:{}", k, v)).collect();
-                        newvec.push((node_hash, values));
+                    // Count occurrences of each node hash
+                    let mut node_counts: HashMap<u64, usize> = HashMap::new();
+                    for (node_hash, _) in &data {
+                        *node_counts.entry(*node_hash).or_insert(0) += 1;
                     }
-                    return newvec;
+
+                    // For node hashes that appear multiple times, keep the entry with the most keys
+                    let mut best_by_node: HashMap<u64, Vec<String>> = HashMap::new();
+
+                    for (node_hash, kv_pairs) in data {
+                        let values: Vec<String> = kv_pairs
+                            .into_iter()
+                            .map(|(k, v)| format!("{}:{}", k, v))
+                            .collect();
+
+                        // If this node hash appears only once, add it directly
+                        if node_counts.get(&node_hash).copied().unwrap_or(0) == 1 {
+                            best_by_node.insert(node_hash, values);
+                        } else {
+                            // Multiple entries for this node hash - keep the one with most keys
+                            let should_replace = match best_by_node.get(&node_hash) {
+                                Some(existing) => values.len() > existing.len(),
+                                None => true,
+                            };
+
+                            if should_replace {
+                                best_by_node.insert(node_hash, values);
+                            }
+                        }
+                    }
+
+                    return best_by_node.into_iter().collect();
                 }
                 _ => {
                     debug!("Failed to get response from successor during wildcard query");
@@ -539,27 +565,67 @@ impl Node {
             drop(state); // Release the lock before sending
 
             let mut map = HashMap::new();
-            let mut node_hash = self.info.id;
+            let mut origin_node_hash = self.info.id;
+            
             for (k, (v, pos, node_info )) in data_clone {
                 if pos == 1 {
                     map.insert(k, v);
-                    node_hash = node_info.id;
+                    origin_node_hash = node_info.id;
                 }
             }
-            
-            let request = Request::QueryAll { source: self.info.addr, data: vec![(node_hash, map)] };
+
+            // Only send origin node data if we found replicas, otherwise send our own empty entry
+            let initial_data = vec![(origin_node_hash, map),(self.info.id, HashMap::new())];
+            let request = Request::QueryAll { source: self.info.addr, data: initial_data };
 
             // Forward to successor and predecessor
             let successor = self.state.read().await.successor.clone();
             let response = self.send_request(successor.addr, request.clone()).await;
             match response {
                 Ok(Response::QueryAll { source: _, data }) => {
-                    let mut newvec = vec![];
-                    for (node_hash, kv_pairs) in data {
-                        let values = kv_pairs.into_iter().map(|(k,v)| format!("{}:{}", k, v)).collect();
-                        newvec.push((node_hash, values));
+                    // Debug: print raw data
+                    debug!("Raw QueryAll data received (linearizability):");
+                    for (node_hash, kv_pairs) in &data {
+                        debug!("  node_hash={}, num_keys={}", node_hash, kv_pairs.len());
+                        for (k, v) in kv_pairs {
+                            debug!("    {}:{}", k, v);
+                        }
                     }
-                    return newvec;
+
+                    // Count occurrences of each node hash
+                    let mut node_counts: HashMap<u64, usize> = HashMap::new();
+                    for (node_hash, _) in &data {
+                        *node_counts.entry(*node_hash).or_insert(0) += 1;
+                    }
+
+                    // For node hashes that appear multiple times, keep the entry with the most keys
+                    let mut best_by_node: HashMap<u64, Vec<String>> = HashMap::new();
+
+                    for (node_hash, kv_pairs) in data {
+                        let values: Vec<String> = kv_pairs
+                            .into_iter()
+                            .map(|(k, v)| format!("{}:{}", k, v))
+                            .collect();
+
+                        // If this node hash appears only once, add it directly
+                        if node_counts.get(&node_hash).copied().unwrap_or(0) == 1 {
+                            best_by_node.insert(node_hash, values);
+                        } else {
+                            // Multiple entries for this node hash - keep the one with most keys
+                            let should_replace = match best_by_node.get(&node_hash) {
+                                Some(existing) => values.len() > existing.len(),
+                                None => true,
+                            };
+
+                            if should_replace {
+                                best_by_node.insert(node_hash, values);
+                            }
+                        }
+                    }
+
+                    debug!("After aggregation (linearizability): {} unique nodes", best_by_node.len());
+
+                    return best_by_node.into_iter().collect();
                 }
                 _ => {
                     debug!("Failed to get response from successor during wildcard query");
@@ -813,7 +879,7 @@ impl Node {
                         let response = self.send_request(successor_addr, request).await;
 
                         match response {
-                            Ok(Response::QueryResponse { source, value }) => {
+                            Ok(Response::QueryResponse { source: _, value }) => {
                                 Response::QueryResponse { source , value }
                             }
                             _ => {
@@ -937,6 +1003,7 @@ impl Node {
 
                     let mut current_data = data.clone();
                     current_data.push((node_hash, map));
+                    current_data.push((self.info.id, HashMap::new()));
 
                     if source == state.successor.addr {
                         Response::QueryAll { source, data: current_data }
