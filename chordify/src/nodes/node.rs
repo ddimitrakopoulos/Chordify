@@ -229,7 +229,7 @@ impl Node {
                     // Send UpdateReplicasOnDepart to successor to update replicas and transfer any new keys that should be replicated to the successor
                     let request = Request::UpdateReplicasOnDepart {
                         data: state.data.clone(),
-                        k_left: state.k,
+                        k_left: state.k-1,
                         startingNodeInfo: state.successor.clone(),
                         replicated_data: state.replicated_data.clone(),
                     };
