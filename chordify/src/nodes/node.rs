@@ -377,9 +377,54 @@ impl Node {
 
     /// Stub for eventual consistency insert.
     pub async fn insert_eventual_consistency(&self, key: String, value: String) -> anyhow::Result<()> {
-        // For eventual consistency, we can just call the no replication insert and rely on
-        // background replication to eventually propagate the value to replicas.
-        self.insert_no_replication(key, value).await
+        // Hash the key to find its identifier
+        let key_hash = hash_value(&key);
+
+        debug!("Inserting key '{}' with hash {}", key, key_hash);
+
+        // If responsible node for the key is this node, store it locally
+        if self.is_responsible_for_hash(key_hash).await {
+            let mut state = self.state.write().await;
+            // Start with the incoming value and update if the key already exists.
+            let mut new_value = value.clone();
+
+            if let Some(existing_value) = state.data.get(&key) {
+                // concatenate on existing data
+                new_value = format!("{}{}", existing_value, value);
+            }
+
+            // insert/update using a clone so `new_value` remains available for
+            // the replica request below
+            state.data.insert(key.clone(), new_value.clone());
+            debug!("Stored key '{}' locally", key);
+
+            let request = Request::InsertReplica {
+                key: key.clone(),
+                value: new_value,
+                node_info: self.info.clone(),
+                k_left: state.k - 1,
+            };
+            self.send_request_no_response(state.successor.addr, request).await?;
+
+            Ok(())
+        }
+        // Otherwise, forward to the appropriate node (successor or predecessor)
+        else {
+            let node_hash = self.info.id;
+            let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
+            else {key_hash - node_hash };
+            let request = Request::Insert { key, value };
+
+            // Forward to successor if it's closer, otherwise forward to predecessor
+            if forward_dist < (1 << (N - 1)){
+                let successor = self.state.read().await.successor.clone();
+                self.send_request_no_response(successor.addr, request).await?;
+            } else {
+                let predecessor = self.state.read().await.predecessor.clone();
+                self.send_request_no_response(predecessor.addr, request).await?;
+            }
+            Ok(())
+        }
     }
 
     /// Query function to retrieve a value by key
@@ -637,7 +682,109 @@ impl Node {
 
     pub async fn query_eventual_consistency(&self, key: String) -> Vec<(u64, Vec<String>)> {
         // For eventual consistency we can return a best-effort value from the responsible node.
-        self.query_no_replication(key).await
+        // Hash the key to find its identifier
+        let key_hash = hash_value(&key);
+        let state = self.state.read().await;
+
+        if key!="*" {
+            // If responsible node for the key is this node, retrieve it locally
+            if self.is_responsible_for_hash(key_hash).await {
+                let value = state.data.get(&key).cloned();
+                let result = vec![(key_hash, value.map(|v| vec![v]).unwrap_or_else(Vec::new))];
+                return result;
+            }
+            else if state.replicated_data.contains_key(&key) {
+                // If we have a replica for the key, return it
+                let (value, _, _) = state.replicated_data.get(&key).unwrap().clone();
+                let result = vec![(key_hash, vec![value])];
+                return result;
+            }
+            // Otherwise, forward to the appropriate node (successor or predecessor)
+            else {
+                let node_hash = self.info.id;
+                let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
+                else {key_hash - node_hash };
+                let request = Request::Query { key, source: self.info.addr };
+                // we'll store the result of the forwarded request here; start with a successful placeholder
+                let mut response: anyhow::Result<Response> = Ok(Response::Ok);
+
+                // Forward to successor if it's closer, otherwise forward to predecessor
+                if forward_dist < (1 << (N - 1)) {
+                    let successor = state.successor.clone();
+                    response = self.send_request(successor.addr, request).await;
+                }
+                else {
+                    let predecessor = state.predecessor.clone();
+                    response = self.send_request(predecessor.addr, request).await;
+                }
+                
+                match response {
+                    Ok(Response::QueryResponse { source: _, value }) => {
+                        let result = vec![(key_hash, value.map(|v| vec![v]).unwrap_or_else(Vec::new))];
+                        return result;
+                    }
+                    _ => {
+                        debug!("Failed to get response from predecessor during query");
+                        return vec![];
+                    }
+                }
+            
+            }
+        
+        }
+        else {
+            // Handle wildcard query: retrieve all key-value pairs from this node and forward to successor/predecessor
+            let state = self.state.read().await;
+            let data_clone = state.data.clone();
+            drop(state); // Release the lock before sending
+
+            let node_hash = self.info.id;
+            let request = Request::QueryAll { source: self.info.addr, data: vec![(node_hash, data_clone)] };
+
+            // Forward to successor and predecessor
+            let successor = self.state.read().await.successor.clone();
+            let response = self.send_request(successor.addr, request.clone()).await;
+            match response {
+                Ok(Response::QueryAll { source: _, data }) => {
+                    // Count occurrences of each node hash
+                    let mut node_counts: HashMap<u64, usize> = HashMap::new();
+                    for (node_hash, _) in &data {
+                        *node_counts.entry(*node_hash).or_insert(0) += 1;
+                    }
+
+                    // For node hashes that appear multiple times, keep the entry with the most keys
+                    let mut best_by_node: HashMap<u64, Vec<String>> = HashMap::new();
+
+                    for (node_hash, kv_pairs) in data {
+                        let values: Vec<String> = kv_pairs
+                            .into_iter()
+                            .map(|(k, v)| format!("{}:{}", k, v))
+                            .collect();
+
+                        // If this node hash appears only once, add it directly
+                        if node_counts.get(&node_hash).copied().unwrap_or(0) == 1 {
+                            best_by_node.insert(node_hash, values);
+                        } else {
+                            // Multiple entries for this node hash - keep the one with most keys
+                            let should_replace = match best_by_node.get(&node_hash) {
+                                Some(existing) => values.len() > existing.len(),
+                                None => true,
+                            };
+
+                            if should_replace {
+                                best_by_node.insert(node_hash, values);
+                            }
+                        }
+                    }
+
+                    return best_by_node.into_iter().collect();
+                }
+                _ => {
+                    debug!("Failed to get response from successor during wildcard query");
+                    return vec![];
+                }
+            }
+        }
     }
 
     /// Delete a key-value pair
@@ -735,7 +882,39 @@ impl Node {
     pub async fn delete_eventual_consistency(&self, key: String) -> anyhow::Result<()> {
         // For eventual consistency, delete at the responsible node and rely on background
         // mechanisms to propagate the delete.
-        self.delete_no_replication(key).await
+        // Hash the key to find its identifier
+        let key_hash = hash_value(&key);
+
+        debug!("Deleting key '{}' with hash {}", key, key_hash);
+
+        // If responsible node for the key is this node, delete it locally
+        if self.is_responsible_for_hash(key_hash).await {
+            let mut state = self.state.write().await;
+            state.data.remove(&key);
+            debug!("Deleted key '{}' locally", key);
+
+            let request = Request::DeleteReplica { key: key.clone(), node_info: self.info.clone(), k_left: state.k - 1 };
+            self.send_request_no_response(state.successor.addr, request).await?;
+
+            Ok(())
+        }
+        // Otherwise, forward to the appropriate node (successor or predecessor)
+        else {
+            let node_hash = self.info.id;
+            let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
+            else {key_hash - node_hash };
+            let request = Request::Delete { key };
+
+            // Forward to successor if it's closer, otherwise forward to predecessor
+            if forward_dist < (1 << (N - 1))  {
+                let successor = self.state.read().await.successor.clone();
+                self.send_request_no_response(successor.addr, request).await?;
+            } else {
+                let predecessor = self.state.read().await.predecessor.clone();
+                self.send_request_no_response(predecessor.addr, request).await?;
+            }
+            Ok(())
+        }
     }
 
 
@@ -773,10 +952,22 @@ impl Node {
                 // (keys for which this node is no longer responsible)
                 let state = self.state.read().await;
                 let mut new_data = HashMap::new();
+                let mut keys_to_remove = Vec::new();
                 for (key, value) in state.data.iter() {
                     if !self.is_responsible_for_key(key).await {
                         new_data.insert(key.clone(), value.clone());
+                        keys_to_remove.push(key.clone());
                     }
+                }
+                drop(state);
+
+                // Delete the collected keys under a write lock
+                if !keys_to_remove.is_empty() {
+                    let mut state = self.state.write().await;
+                    for key in keys_to_remove {
+                        state.data.remove(&key);
+                    }
+                    drop(state);
                 }
 
                 // Send the keys to the new predecessor
@@ -786,6 +977,7 @@ impl Node {
                 }
 
                 // Send replicated data that should be transferred to the new predecessor
+                let state = self.state.read().await;
                 if state.k > 1 {
                     let request = Request::TransferReplicas { new_replicated_data: state.replicated_data.clone() , node_addr: self.info.addr };
                     self.send_request_no_response(node.addr, request).await?;
@@ -917,7 +1109,51 @@ impl Node {
                         }
                     }
                 } else {
-                    Response::Ok
+
+                    let key_hash = hash_value(&key);
+                    let state = self.state.read().await;
+                    
+                    // If responsible node for the key is this node, retrieve it locally
+                    if self.is_responsible_for_hash(key_hash).await {
+                        let value = state.data.get(&key).cloned();
+                        //let predecessor = state.predecessor.clone();
+                        drop(state);
+                        
+                        Response::QueryResponse { source, value }
+                    }
+                    else if state.replicated_data.contains_key(&key) {
+                        // If we have a replica for the key, return it
+                        let (value, _, _) = state.replicated_data.get(&key).unwrap().clone();
+                        Response::QueryResponse { source, value: Some(value) }
+                    }
+                    // Otherwise, forward to the appropriate node (successor or predecessor)
+                    else {
+                        let node_hash = self.info.id;
+                        let forward_dist = if node_hash >= key_hash {(1 << N) - node_hash + key_hash } 
+                        else {key_hash - node_hash };
+                        let request = Request::Query { key, source };
+                        let mut response = Response::Ok; // Placeholder response in case forwarding fails
+
+                        // Forward to successor if it's closer, otherwise forward to predecessor
+                        if forward_dist < (1 << (N - 1)) {
+                            let successor = state.successor.clone();
+                            response = self.send_request(successor.addr, request).await?;
+
+                        } else {
+                            let predecessor = state.predecessor.clone();
+                            response = self.send_request(predecessor.addr, request).await?;
+                        }
+
+                        match response {
+                            Response::QueryResponse { source: _, value } => {
+                                Response::QueryResponse { source, value }
+                            }
+                            _ => {
+                                debug!("Failed to get response from successor during query");
+                                Response::QueryResponse { source, value: None }
+                            }
+                        }
+                    }
                 }
                 
             }
@@ -957,7 +1193,7 @@ impl Node {
                 let t = state.t;
                 drop(state);
 
-                if k <= 1 {
+                if k <= 1 || (k > 1 && t == 1) {
 
                     // Add own data to the response before forwarding
                     let state = self.state.read().await;
@@ -1078,7 +1314,7 @@ impl Node {
                 drop(state);
 
                 // Send the UpdateReplicas request to the successor
-                let successor = self.state.read().await.successor.clone();
+                //let successor = self.state.read().await.successor.clone();
                 self.send_request_no_response(node_addr, request).await?;
 
                 Response::Ok
@@ -1142,7 +1378,6 @@ impl Node {
                 let mut state = self.state.write().await;
                 let mut new_replicated_data: HashMap<String, (String, u64, NodeInfo)> = HashMap::new();
                 let successor_addr = state.successor.addr;
-                let k = state.k;
 
                 // First, process all keys in current replicated_data
                 for (key, (value, replication_pos, node_info)) in state.replicated_data.iter() {
