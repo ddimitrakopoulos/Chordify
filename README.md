@@ -8,12 +8,19 @@
 
 ---
 
-## 📋 Περιγραφή Project
+## Περιγραφή Project
 Υλοποίηση του **Chordify**, μιας P2P εφαρμογής ανταλλαγής τραγουδιών βασισμένη στο πρωτόκολλο **Chord DHT**. Το σύστημα υποστηρίζει δυναμική εισαγωγή/αποχώρηση κόμβων, κατακερματισμό κλειδιών (hashing) και replication δεδομένων με διαφορετικά μοντέλα συνέπειας.
 
 ---
 
-## 🚀 Progress Tracker / Roadmap
+## Usage
+Ενεργοποίηση του bootstrap: cargo run --bin chordify <local_ip> -k <replication_factor> -t <consistency_type>
+Είσοδος κόμβου: cargo run --bin chordify <local_ip> <bootstrap_ip>
+
+## Dependecies
+- gnome-terminal
+
+## Progress Tracker / Roadmap
 
 ### Φάση 1: Επιλογές Αρχιτεκτονικής 
 - [x] **Επιλογή Γλώσσας:** Rust (safe, fast, excellent async support)
@@ -38,30 +45,29 @@
 - [ ] *(Bonus)* **Finger Tables:** Υλοποίηση λογαριθμικής δρομολόγησης (προαιρετικό).
 
 ### Φάση 5: Replication & Consistency
-- [ ] **Replication Strategy:** Αποθήκευση ζευγών `<key, value>` στον υπεύθυνο κόμβο και στους $k-1$ επόμενους.
-- [ ] **Linearizability (Strong Consistency):**
-  - [ ] Υλοποίηση μηχανισμού (Chain Replication ή Quorum).
-  - [ ] Διαχείριση Read/Write με versions.
-- [ ] **Eventual Consistency:**
-  - [ ] Lazy propagation των writes στους replicas.
-  - [ ] Reads από οποιονδήποτε replica (πιθανότητα stale data).
+- [x] **Replication Strategy:** Αποθήκευση ζευγών `<key, value>` στον υπεύθυνο κόμβο και στους $k-1$ επόμενους.
+- [x] **Linearizability (Strong Consistency):**
+  - [x] Υλοποίηση μηχανισμού (Chain Replication).
+- [x] **Eventual Consistency:**
+  - [x] Lazy propagation των writes στους replicas.
+  - [x] Reads από οποιονδήποτε replica (πιθανότητα stale data).
 
 ### Φάση 6: Client (CLI)
-- [ ] **Help:** Εκτύπωση οδηγιών.
-- [ ] **Insert:** `insert <key> <value>`.
-- [ ] **Delete:** `delete <key>`.
-- [ ] **Query:** `query <key>` (και υποστήριξη `query *`).
-- [ ] **Depart:** `depart`.
-- [ ] **Overlay:** `overlay` (Εκτύπωση τοπολογίας δακτυλίου).
+- [x] **Help:** Εκτύπωση οδηγιών.
+- [x] **Insert:** `insert <key> <value>`.
+- [x] **Delete:** `delete <key>`.
+- [x] **Query:** `query <key>` (και υποστήριξη `query *`).
+- [x] **Depart:** `depart`.
+- [x] **Overlay:** `overlay` (Εκτύπωση τοπολογίας δακτυλίου).
 
 ### Φάση 7: Graphics (GUI) (optional)
-- [ ] *(Bonus)* **GUI:** Υλοποίηση gui για την κλήση των commands όπως στο CLI
+- [x] *(Bonus)* **GUI:** Υλοποίηση gui για την κλήση των commands όπως στο CLI
 
 ### Φάση 8: Πειράματα (AWS)
-- [ ] **Setup:** Στήσιμο σε 10 κόμβους στο AWS.
-- [ ] **Experiment 1 (Write Throughput):** Insert keys από αρχεία `insert_n.txt` με $k=1, 3, 5$ (Linear & Eventual).
-- [ ] **Experiment 2 (Read Throughput):** Query keys από αρχεία `query_n.txt` με τα παραπάνω setups.
-- [ ] **Experiment 3 (Consistency Check):** Εκτέλεση `requests.txt` και σύγκριση φρεσκάδας δεδομένων (Linear vs Eventual).
+- [x] **Setup:** Στήσιμο σε 10 κόμβους στο AWS.
+- [x] **Experiment 1 (Write Throughput):** Insert keys από αρχεία `insert_n.txt` με $k=1, 3, 5$ (Linear & Eventual).
+- [x] **Experiment 2 (Read Throughput):** Query keys από αρχεία `query_n.txt` με τα παραπάνω setups.
+- [x] **Experiment 3 (Consistency Check):** Εκτέλεση `requests.txt` και σύγκριση φρεσκάδας δεδομένων (Linear vs Eventual).
 
 ### Φάση 9: Αναφορά
 - [ ] **Αναφορά:** Σύνθεση αναφοράς και σχολιασμός αποτελεσμάτων
