@@ -16,12 +16,12 @@
 ## Usage
 - Ενεργοποίηση του bootstrap: cargo run --bin chordify <local_ip> -k <replication_factor> -t <consistency_type>
 - Είσοδος κόμβου: cargo run --bin chordify <local_ip> <bootstrap_ip>
-- **Help:** Εκτύπωση οδηγιών.
-- **Insert:** είσοδος κλειδιού key με τιμή value `insert <key> <value>`.
-- **Delete:** διαγραφή κλειδιού key `delete <key>`.
-- **Query:** επιστροφή τιμής κλειδιού key`query <key>` (και υποστήριξη `query *`).
-- **Depart:** αποχώρηση κόμβου `depart`.
-- **Overlay:** εκτύπωση τοπολογίας δικτύου `overlay` (Εκτύπωση τοπολογίας δακτυλίου).
+- **Help:** Εκτύπωση οδηγιών
+- **Insert:** είσοδος κλειδιού key με τιμή value `insert <key> <value>` (για space seperated key πρέπει το κλειδί να ενθυλακωθεί σε ")
+- **Delete:** διαγραφή κλειδιού key `delete <key>`
+- **Query:** επιστροφή τιμής κλειδιού key`query <key>` (και υποστήριξη `query *`)
+- **Depart:** αποχώρηση κόμβου `depart`
+- **Overlay:** εκτύπωση τοπολογίας δικτύου `overlay`
 
 ## Dependecies
 - cargo
