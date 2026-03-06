@@ -26,8 +26,8 @@
 
 ## Usage - GUI
 - Αρχικά κάνουμε cd στο chordify/
-- Ενεργοποίηση του bootstrap: ```cargo run --bin chordify 127.0.0.1:8000 -k <replication_factor> -t <consistency_type>```
-- Είσοδος κόμβου: ```cargo run --bin chordify <local_ip> 127.0.0.1:8000```
+- Ενεργοποίηση του bootstrap: ```cargo run --bin gui_server 127.0.0.1:8000 -k <replication_factor> -t <consistency_type>```
+- Είσοδος κόμβου: ```cargo run --bin gui_server <local_ip> 127.0.0.1:8000```
 
 - Μετά κάνουμε cd στο ChordifyGUI
 - Τρέχουμε ```npm install``` για να κατέβουν οι βιβλιοθήκες
