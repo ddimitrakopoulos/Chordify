@@ -404,7 +404,7 @@ impl Node {
                 node_info: self.info.clone(),
                 k_left: state.k - 1,
             };
-            let _ = self.send_request(state.successor.addr, request).await?;
+            self.send_request_no_response(state.successor.addr, request).await?;
 
             Ok(())
         }
@@ -418,10 +418,10 @@ impl Node {
             // Forward to successor if it's closer, otherwise forward to predecessor
             if forward_dist < (1 << (N - 1)){
                 let successor = self.state.read().await.successor.clone();
-                let _ = self.send_request(successor.addr, request).await?;
+                self.send_request_no_response(successor.addr, request).await?;
             } else {
                 let predecessor = self.state.read().await.predecessor.clone();
-                let _ = self.send_request(predecessor.addr, request).await?;
+                self.send_request_no_response(predecessor.addr, request).await?;
             }
             Ok(())
         }
