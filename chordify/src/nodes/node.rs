@@ -973,7 +973,7 @@ impl Node {
                 // Send replicated data that should be transferred to the new predecessor
                 let state = self.state.read().await;
                 if state.k > 1 {
-                    let request = Request::TransferReplicas { new_replicated_data: state.replicated_data.clone() , node_addr: self.info.addr, k: state.k };
+                    let request = Request::TransferReplicas { new_replicated_data: state.replicated_data.clone() , node_addr: self.info.addr};
                     self.send_request_no_response(node.addr, request).await?;
                 }
                 drop(state);
@@ -1308,7 +1308,7 @@ impl Node {
                 Response::Ok
             },
 
-            Request::TransferReplicas { new_replicated_data, node_addr, k} => {
+            Request::TransferReplicas { new_replicated_data, node_addr} => {
                 // Move new replicated data into our state
                 let mut state = self.state.write().await;
                 state.replicated_data = new_replicated_data;
@@ -1318,7 +1318,7 @@ impl Node {
                 // Send message to successors to update their replicas
                 let request = Request::UpdateReplicas { 
                     data: state.data.clone(), 
-                    k_left: k-1,
+                    k_left: state.k-1,
                 };
                 drop(state);
 

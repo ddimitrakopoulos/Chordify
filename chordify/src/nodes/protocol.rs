@@ -46,7 +46,6 @@ pub enum Request {
     TransferReplicas {
         new_replicated_data: HashMap<String, (String, u64, NodeInfo)>,
         node_addr: SocketAddr,
-        k: u64,
     },
 
     /// Request to update replicas to new node
