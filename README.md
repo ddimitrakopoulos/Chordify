@@ -14,8 +14,14 @@
 ---
 
 ## Usage
-Ενεργοποίηση του bootstrap: cargo run --bin chordify <local_ip> -k <replication_factor> -t <consistency_type>
-Είσοδος κόμβου: cargo run --bin chordify <local_ip> <bootstrap_ip>
+- Ενεργοποίηση του bootstrap: cargo run --bin chordify <local_ip> -k <replication_factor> -t <consistency_type>
+- Είσοδος κόμβου: cargo run --bin chordify <local_ip> <bootstrap_ip>
+- **Help:** Εκτύπωση οδηγιών.
+- **Insert:** `insert <key> <value>`.
+- **Delete:** `delete <key>`.
+- **Query:** `query <key>` (και υποστήριξη `query *`).
+- **Depart:** `depart`.
+- **Overlay:** `overlay` (Εκτύπωση τοπολογίας δακτυλίου).
 
 ## Dependecies
 - gnome-terminal
