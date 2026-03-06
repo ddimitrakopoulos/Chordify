@@ -13,9 +13,10 @@
 
 ---
 
-## Usage
-- Ενεργοποίηση του bootstrap: cargo run --bin chordify <local_ip> -k <replication_factor> -t <consistency_type>
-- Είσοδος κόμβου: cargo run --bin chordify <local_ip> <bootstrap_ip>
+## Usage - CLI
+- Αρχικά κάνουμε cd στο chordify/
+- Ενεργοποίηση του bootstrap: ```cargo run --bin chordify <local_ip> -k <replication_factor> -t <consistency_type>```
+- Είσοδος κόμβου: ```cargo run --bin chordify <local_ip> <bootstrap_ip>```
 - **Help:** Εκτύπωση οδηγιών
 - **Insert:** είσοδος κλειδιού key με τιμή value `insert <key> <value>` (για space seperated key πρέπει το κλειδί να ενθυλακωθεί σε ")
 - **Delete:** διαγραφή κλειδιού key `delete <key>`
@@ -23,9 +24,21 @@
 - **Depart:** αποχώρηση κόμβου `depart`
 - **Overlay:** εκτύπωση τοπολογίας δικτύου `overlay`
 
+## Usage - GUI
+- Αρχικά κάνουμε cd στο chordify/
+- Ενεργοποίηση του bootstrap: ```cargo run --bin chordify **127.0.0.1:8000** -k <replication_factor> -t <consistency_type>```
+- Είσοδος κόμβου: ```cargo run --bin chordify <local_ip> **127.0.0.1:8000**```
+
+- Μετά κάνουμε cd στο ChordifyGUI
+- Τρέχουμε ```npm install``` για να κατέβουν οι βιβλιοθήκες
+- Τρέχουμε ```npm run dev``` και πατάμε στο link που τυπώνει (συνήθως http://localhost:5173/)
+
 ## Dependecies
 - cargo
 - gnome-terminal
+
+## ΠΡΟΣΟΧΗ
+Το GUI ενδεχεται να μην λειτουργεί σε εκτέλεση μέσω WSL. Σε περίπτωση που έχετε κάνει git clone σε WSL μπορείτε να τρέχετε τον rust κώδικα μέσα από αυτό και να μετακινήσετε όλο το ChordifyGUI/ folder σε ένα σημειο στα Windows και να τρέξετε ```npm install``` και ```npm run dev``` από εκεί. Αν χρησιμοποιείτε native Linux τότε δουλεύουν όλα κανονικά. 
 
 ## Progress Tracker / Roadmap
 
@@ -77,4 +90,4 @@
 - [x] **Experiment 3 (Consistency Check):** Εκτέλεση `requests.txt` και σύγκριση φρεσκάδας δεδομένων (Linear vs Eventual).
 
 ### Φάση 9: Αναφορά
-- [ ] **Αναφορά:** Σύνθεση αναφοράς και σχολιασμός αποτελεσμάτων
+- [x] **Αναφορά:** Σύνθεση αναφοράς και σχολιασμός αποτελεσμάτων
