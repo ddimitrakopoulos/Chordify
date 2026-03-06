@@ -345,14 +345,15 @@ impl Node {
             // the replica request below
             state.data.insert(key.clone(), new_value.clone());
             debug!("Stored key '{}' locally", key);
-
+            let successor = state.successor.clone();
             let request = Request::InsertReplica {
                 key: key.clone(),
                 value: new_value,
                 node_info: self.info.clone(),
                 k_left: state.k - 1,
             };
-            let _ = self.send_request(state.successor.addr, request).await?;
+            drop(state);
+            let _ = self.send_request(successor.addr, request).await?;
 
             Ok(())
         }
@@ -398,13 +399,18 @@ impl Node {
             state.data.insert(key.clone(), new_value.clone());
             debug!("Stored key '{}' locally", key);
 
+            // IMPORTANT: do not hold the write-lock while awaiting network I/O.
+            let successor = state.successor.clone();
+            let k_left = state.k - 1;
+            drop(state);
+
             let request = Request::InsertReplica {
                 key: key.clone(),
                 value: new_value,
                 node_info: self.info.clone(),
-                k_left: state.k - 1,
+                k_left,
             };
-            self.send_request_no_response(state.successor.addr, request).await?;
+            let _ = self.send_request(successor.addr, request).await?;
 
             Ok(())
         }
@@ -983,17 +989,31 @@ impl Node {
             }
 
             Request::InsertReplica { key, value, node_info, k_left } => {
-                let mut state = self.state.write().await;
-                state.replicated_data.insert(key.clone(), (value.clone(), k_left, node_info.clone()));
+                // IMPORTANT: don't hold the write-lock across an `.await` (can deadlock)
+                // because the forwarded request may come back to this node and also need
+                // the same lock.
+                let successor_addr = {
+                    let mut state = self.state.write().await;
+                    state
+                        .replicated_data
+                        .insert(key.clone(), (value.clone(), k_left, node_info.clone()));
+                    state.successor.addr
+                };
 
                 // Forward the replica to the successor if we still have replication hops left
                 if k_left > 1 {
-                    let request = Request::InsertReplica { key, value, node_info, k_left: k_left - 1 };
-                    let successor = state.successor.clone();
-                    self.send_request_no_response(successor.addr, request).await?;
-                }
-                else if k_left == 1 {
-                    debug!("Inserted replica for key '{}' at final replica node {}", key, self.info.addr);
+                    let request = Request::InsertReplica {
+                        key,
+                        value,
+                        node_info,
+                        k_left: k_left - 1,
+                    };
+                    self.send_request_no_response(successor_addr, request).await?;
+                } else if k_left == 1 {
+                    debug!(
+                        "Inserted replica for key '{}' at final replica node {}",
+                        key, self.info.addr
+                    );
                 }
 
                 Response::Ok
