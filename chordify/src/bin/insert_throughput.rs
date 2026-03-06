@@ -41,18 +41,13 @@ struct Args {
     #[arg(long)]
     bootstrap: SocketAddr,
 
-    /// Directory containing `insert_*.txt` files.
-    #[arg(long, default_value = "data/insert")]
-    insert_dir: PathBuf,
+    /// Path to the insert file to replay (one key per line).
+    #[arg(long, default_value = "data/insert/insert_00_part.txt")]
+    insert_file: PathBuf,
 
     /// Value to insert for each key.
-    #[arg(long, default_value = "1")]
+    #[arg(long, default_value = "1skkapmt")]
     value: String,
-
-    /// If true, skip duplicate keys across files (benchmark unique keys).
-    /// If false, insert everything as encountered.
-    #[arg(long, default_value_t = true)]
-    dedup: bool,
 
     /// Optional: extra delay after joining (lets ring stabilize).
     #[arg(long, default_value_t = 500)]
@@ -79,23 +74,6 @@ async fn start_client_node(addr: SocketAddr, bootstrap: SocketAddr) -> anyhow::R
 
     node.join().await?;
     Ok(node)
-}
-
-fn list_insert_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    let mut files: Vec<PathBuf> = fs::read_dir(dir)
-        .with_context(|| format!("failed to read insert dir {}", dir.display()))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_file())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|s| s.to_str())
-                .is_some_and(|name| name.starts_with("insert_") && name.ends_with(".txt"))
-        })
-        .collect();
-
-    files.sort();
-    Ok(files)
 }
 
 fn load_keys_from_file(path: &Path) -> anyhow::Result<Vec<String>> {
@@ -131,11 +109,10 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
-    let files = list_insert_files(&args.insert_dir)?;
-    if files.is_empty() {
+    if !args.insert_file.is_file() {
         return Err(anyhow!(
-            "no insert_*.txt files found under {}",
-            args.insert_dir.display()
+            "insert file not found: {}",
+            args.insert_file.display()
         ));
     }
 
@@ -147,35 +124,29 @@ async fn main() -> anyhow::Result<()> {
     let node = start_client_node(args.addr, args.bootstrap).await?;
     tokio::time::sleep(Duration::from_millis(args.join_grace_ms)).await;
 
-    // Load all keys.
-    let mut keys: Vec<String> = Vec::new();
-    for p in &files {
-        keys.extend(load_keys_from_file(p)?);
-    }
-
-    let total_loaded = keys.len();
-
-    if args.dedup {
-        keys.sort();
-        keys.dedup();
-    }
-
-    let total_to_insert = keys.len();
+    let keys = load_keys_from_file(&args.insert_file)?;
+    let insert_ops = keys.len();
 
     info!(
-        "Loaded {} keys ({} after dedup={}) from {} files",
-        total_loaded,
-        total_to_insert,
-        args.dedup,
-        files.len()
+        "Loaded {} insert ops from {}",
+        insert_ops,
+        args.insert_file.display()
     );
+
+    //sleep for 5 seconds to let the ring stabilize after join before starting insert
+    tokio::time::sleep(Duration::from_millis(5000)).await;
 
     let start = Instant::now();
 
-    for (i, key) in keys.iter().enumerate() {
+    for (i, key) in keys.into_iter().enumerate() {
         node.insert(key.clone(), args.value.clone())
             .await
-            .with_context(|| format!("insert failed at {} / {} (key='{}')", i + 1, total_to_insert, key))?;
+            .with_context(|| format!(
+                "insert failed at {} / {} (key='{}')",
+                i + 1,
+                insert_ops,
+                key
+            ))?;
 
         if args.delay_ms > 0 {
             tokio::time::sleep(Duration::from_millis(args.delay_ms)).await;
@@ -191,12 +162,12 @@ async fn main() -> anyhow::Result<()> {
 
     let secs = elapsed.as_secs_f64();
     let throughput = if secs > 0.0 {
-        (total_to_insert as f64) / secs
+        (insert_ops as f64) / secs
     } else {
         f64::INFINITY
     };
 
-    println!("inserted_keys={}", total_to_insert);
+    println!("insert_ops={}", insert_ops);
     println!("elapsed_ms={}", elapsed.as_millis());
     println!("throughput_inserts_per_sec={:.3}", throughput);
 
