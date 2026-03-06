@@ -31,7 +31,10 @@
 
 - Μετά κάνουμε cd στο ChordifyGUI
 - Τρέχουμε ```npm install``` για να κατέβουν οι βιβλιοθήκες
-- Τρέχουμε ```npm run dev``` και πατάμε στο link που τυπώνει (συνήθως http://localhost:5173/)
+- Τρέχουμε ```npm run dev``` και πατάμε στο link που τυπώνει (συνήθως http://localhost:5173/) 
+
+<img width="1900" height="1348" alt="localhost_5173_ (1)" src="https://github.com/user-attachments/assets/9b8708cd-9653-4ff9-ba0a-342eb94222e8" />
+
 
 ## Dependecies
 - cargo
