@@ -40,7 +40,32 @@ pub enum Request {
     
     /// Request to depart from the ring (sent to bootstrap node)
     /// Bootstrap will coordinate all pointer updates and key transfers
-    DepartRequest { departing_node: NodeInfo }
+    DepartRequest { departing_node: NodeInfo },
+    
+    /// Request to transfer replicas to new node
+    TransferReplicas {
+        new_replicated_data: HashMap<String, (String, u64, NodeInfo)>,
+        node_addr: SocketAddr,
+    },
+
+    /// Request to update replicas to new node
+    UpdateReplicas { data: HashMap<String, String>, k_left: u64 },
+
+    /// Request to update replicas on node departure (same input as UpdateReplicas)
+    UpdateReplicasOnDepart { data: HashMap<String, String>, k_left: u64, startingNodeInfo: NodeInfo, replicated_data: HashMap<String, (String, u64, NodeInfo)> },
+
+    /// Request to insert a replica of a key-value pair
+    InsertReplica { key: String, value: String, node_info: NodeInfo, k_left: u64 },
+
+    /// Request to delete a replica of a key
+    DeleteReplica { key: String, node_info: NodeInfo, k_left: u64 },
+
+    /// Request to query the last replica in the chain for a key (used for linearizability)
+    QueryLastReplica { key: String, k_left: u64 },
+
+    /// Request to print the topology of the ring
+    Overlay,
+
 }
 
 /// Response messages sent between nodes
@@ -64,17 +89,22 @@ pub enum Response {
     Keys(Vec<(String, String)>),
     /// Error response
     Error(String),
-    
+
     // === Bootstrap-coordinated operation responses ===
     
-    /// Join successful - includes the assigned successor and predecessor
+    /// Join successful - includes the assigned successor, predecessor, and replication parameters
     JoinSuccess { 
         successor: NodeInfo, 
         predecessor: NodeInfo,
+        k: u64,
+        t: u8,
     },
     
     /// Depart acknowledged - node can now shut down
     DepartSuccess,
+
+    /// Response to Overlay request - includes the topology information
+    OverlayResponse { topology: Vec<(u64, SocketAddr)> },
 }
 
 impl Request {

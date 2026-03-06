@@ -20,6 +20,10 @@ pub struct BootstrapNode {
     addr: SocketAddr,
     /// Track all nodes in the ring (for coordination)
     ring_members: Arc<RwLock<Vec<NodeInfo>>>,
+    /// Replication factor
+    k: u64,
+    /// Replication type
+    t: u8,
 }
 
 impl Clone for BootstrapNode {
@@ -27,6 +31,8 @@ impl Clone for BootstrapNode {
         Self {
             addr: self.addr,
             ring_members: Arc::clone(&self.ring_members),
+            k: self.k,
+            t: self.t,
         }
     }
 }
@@ -49,10 +55,12 @@ pub fn hash_string_to_u64(data: &str) -> u64 {
 impl BootstrapNode {
     /// Create a new bootstrap node at the given address.
     /// This is the first node in the ring.
-    pub fn new(addr: SocketAddr) -> Self {
+    pub fn new(addr: SocketAddr, k: u64, t: u8) -> Self {
         Self {
             addr,
             ring_members: Arc::new(RwLock::new(Vec::new())),
+            k,
+            t,
         }
     }
 
@@ -95,7 +103,7 @@ impl BootstrapNode {
                 // Bootstrap-coordinated join
                 match self.coordinate_join(joining_node.addr).await {
                     Ok((successor, predecessor)) => {
-                        Response::JoinSuccess { successor, predecessor } 
+                        Response::JoinSuccess { successor, predecessor, k: self.k, t: self.t }
                     },
                     Err(e) => {
                         warn!("Failed to coordinate join: {}", e);
@@ -116,6 +124,13 @@ impl BootstrapNode {
                         Response::Error(format!("Depart failed: {}", e))
                     }
                 }
+            }
+
+            Request::Overlay => {
+                // Return the topology of the ring (for debugging)
+                let members = self.ring_members.read().await;
+                let topology = members.iter().map(|m| (m.id, m.addr)).collect();
+                Response::OverlayResponse { topology }
             }
             
             // default case for unrecognized requests
@@ -225,7 +240,6 @@ impl BootstrapNode {
                 Err(e) => warn!("Failed to notify predecessor: {}", e),
             }
         }
-        
 
         info!("Join coordination complete for {}", joining_addr);
         Ok((successor, predecessor))
