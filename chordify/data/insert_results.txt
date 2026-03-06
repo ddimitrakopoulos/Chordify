@@ -1,0 +1,5 @@
+k = 1 and t = 0
+
+inserted_keys=496
+elapsed_ms=136
+throughput_inserts_per_sec=3640.611
