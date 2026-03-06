@@ -57,7 +57,7 @@ fn split_cli_args(line: &str) -> Vec<String> {
 fn main() -> anyhow::Result<()> {
     // logging
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::DEBUG)
+        .with_max_level(Level::WARN)
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
