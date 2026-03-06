@@ -967,7 +967,7 @@ impl Node {
                 // Send replicated data that should be transferred to the new predecessor
                 let state = self.state.read().await;
                 if state.k > 1 {
-                    let request = Request::TransferReplicas { new_replicated_data: state.replicated_data.clone() , node_addr: self.info.addr };
+                    let request = Request::TransferReplicas { new_replicated_data: state.replicated_data.clone() , node_addr: self.info.addr, k: state.k };
                     self.send_request_no_response(node.addr, request).await?;
                 }
                 drop(state);
@@ -1288,16 +1288,17 @@ impl Node {
                 Response::Ok
             },
 
-            Request::TransferReplicas { new_replicated_data, node_addr } => {
+            Request::TransferReplicas { new_replicated_data, node_addr, k} => {
                 // Move new replicated data into our state
                 let mut state = self.state.write().await;
                 state.replicated_data = new_replicated_data;
                 info!("Received and stored transferred replicas");
 
+                debug!("Value of k is {}", state.k);
                 // Send message to successors to update their replicas
                 let request = Request::UpdateReplicas { 
                     data: state.data.clone(), 
-                    k_left: state.k-1,
+                    k_left: k-1,
                 };
                 drop(state);
 
@@ -1316,6 +1317,13 @@ impl Node {
 
                 let predecessor_info = state.predecessor.clone();
                 let successor_addr = state.successor.addr;
+
+                // print all replicated data before update
+                debug!("Current replicated data before update:");
+                for (key, (value, replication_pos, node_info)) in state.replicated_data.iter() {
+                    debug!("Key: {}, Value: {}, Replication Pos: {}, Node Info: {:?}", key, value, replication_pos, node_info);
+                }
+
 
                 for (key, (value, replication_pos, node_info)) in state.replicated_data.iter() {
                     if data.get(key).is_some_and(|v| v == value) {
