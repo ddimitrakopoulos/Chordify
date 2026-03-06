@@ -20,6 +20,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use rand::random;
 
 use anyhow::{anyhow, Context};
 use clap::Parser;
@@ -162,23 +163,23 @@ async fn main() -> anyhow::Result<()> {
 
     let elapsed = start.elapsed();
 
-    let results = node.query("*".to_string()).await;
-    let mut i = 0;
-    if results.is_empty() {
-        println!("no entries found");
-    } else {
-        for (hash, vals) in results {
-            if vals.is_empty() {
-                //println!("key hash {}: <none>", hash);
-            } else {
-                //println!("key hash {}: {}", hash, vals.join(", "));
-            }
-            i += vals.len();
-        }
-    }
-    println!("TOTAL QUERIED KEYS: {}", i);
+    // let results = node.query("*".to_string()).await;
+    // let mut i = 0;
+    // if results.is_empty() {
+    //     println!("no entries found");
+    // } else {
+    //     for (hash, vals) in results {
+    //         if vals.is_empty() {
+    //             //println!("key hash {}: <none>", hash);
+    //         } else {
+    //             //println!("key hash {}: {}", hash, vals.join(", "));
+    //         }
+    //         i += vals.len();
+    //     }
+    // }
+    // println!("TOTAL QUERIED KEYS: {}", i);
     tokio::time::sleep(Duration::from_millis(args.pre_query_wait_ms)).await;
-
+    tokio::time::sleep(Duration::from_millis(rand::random::<u64>() % 3000)).await;
     // Best-effort depart.
     if let Err(e) = node.depart(args.bootstrap).await {
         warn!("node depart failed (ignored): {e:?}");
