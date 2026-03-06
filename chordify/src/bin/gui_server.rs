@@ -145,9 +145,9 @@ fn split_cli_args(line: &str) -> Vec<String> {
 }
 
 fn main() -> anyhow::Result<()> {
-    // logging
+    // logging completely disabled
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::DEBUG)
+        .with_max_level(tracing::level_filters::LevelFilter::OFF)
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
@@ -311,8 +311,8 @@ fn main() -> anyhow::Result<()> {
                     .route("/insert", post(handle_insert))
                     // Note: Since React might pass "*", we use a query param or careful path routing. 
                     // Axum handles wildcards in paths fine if URL-encoded.
-                    .route("/query/:key", get(handle_query)) 
-                    .route("/delete/:key", delete(handle_delete))
+                    .route("/query/{key}", get(handle_query)) 
+                    .route("/delete/{key}", delete(handle_delete))
                     .route("/overlay", get(handle_overlay))
                     .route("/depart", post(handle_depart))
                     .layer(cors)
