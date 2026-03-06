@@ -5,7 +5,7 @@ cd ../target/debug
 k="$1"
 t="$2"
 
-gnome-terminal -- bash -c './chordify 127.0.0.1:8000 -k "$k" -t "$t"; exec bash'
+gnome-terminal -- bash -c 'echo "k=$1 t=$2"; ./chordify 127.0.0.1:8000 -k $1 -t $2; exec bash' _ "$k" "$t"
 
 gnome-terminal -- bash -c ' time (
     sleep 6
