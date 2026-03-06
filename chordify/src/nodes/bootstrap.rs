@@ -19,7 +19,7 @@ pub struct BootstrapNode {
     /// IP:Port of bootstrap
     addr: SocketAddr,
     /// Track all nodes in the ring (for coordination)
-    ring_members: Arc<RwLock<Vec<NodeInfo>>>,
+    pub ring_members: Arc<RwLock<Vec<NodeInfo>>>,
     /// Replication factor
     k: u64,
     /// Replication type

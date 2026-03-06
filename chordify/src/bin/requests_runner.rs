@@ -158,7 +158,7 @@ async fn start_client_node(addr: SocketAddr, bootstrap: SocketAddr) -> anyhow::R
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
+        .with_max_level(tracing::level_filters::LevelFilter::OFF)
         .finish();
     tracing::subscriber::set_global_default(subscriber)
         .context("failed to init tracing subscriber")?;

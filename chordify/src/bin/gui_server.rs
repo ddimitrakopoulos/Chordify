@@ -10,7 +10,6 @@
 //! the bootstrap address.  Otherwise this process becomes the bootstrap node
 //! (first node in a new ring).
 
-use std::io::{self, BufRead};
 use std::net::SocketAddr;
 use std::thread;
 use std::sync::Arc;
@@ -19,6 +18,97 @@ use tracing_subscriber::FmtSubscriber;
 
 use chordify::nodes::Node;
 use chordify::BootstrapNode;
+
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    routing::{delete, get, post},
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
+use tower_http::cors::{Any, CorsLayer};
+
+// App State to share the Node across HTTP requests
+#[derive(Clone)]
+struct AppState {
+    node: Arc<Node>,
+    bootstrap_addr: Option<SocketAddr>,
+}
+
+// Request / Response structures
+#[derive(Deserialize)]
+struct InsertReq {
+    key: String,
+    value: String,
+}
+
+// Axum Handlers
+async fn handle_insert(
+    State(state): State<AppState>,
+    Json(payload): Json<InsertReq>,
+) -> Result<String, StatusCode> {
+    println!("API: Inserting key '{}' with value '{}'...", payload.key, payload.value);
+    match state.node.insert(payload.key, payload.value).await {
+        Ok(_) => Ok("Insert successful".to_string()),
+        Err(e) => {
+            eprintln!("Insert failed: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn handle_query(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+) -> Result<Json<Vec<(u64, Vec<String>)>>, StatusCode> { // Assuming hash is u64 based on your original prints
+    println!("API: Querying key '{}'...", key);
+    let results = state.node.query(key).await;
+    Ok(Json(results))
+}
+
+async fn handle_delete(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+) -> Result<String, StatusCode> {
+    println!("API: Deleting key '{}'...", key);
+    match state.node.delete(key).await {
+        Ok(_) => Ok("Delete successful".to_string()),
+        Err(e) => {
+            eprintln!("Delete failed: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn handle_overlay(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<(u64, SocketAddr)>>, StatusCode> { // Assuming ID is u64
+    println!("API: Requesting ring topology...");
+    let topo = state.node.overlay().await;
+    Ok(Json(topo))
+}
+
+async fn handle_depart(State(state): State<AppState>) -> Result<String, StatusCode> {
+    if let Some(bs) = state.bootstrap_addr {
+        println!("API: Departing from ring via bootstrap at {}...", bs);
+        match state.node.depart(bs).await {
+            Ok(_) => {
+                // Exit the process after a successful departure
+                tokio::spawn(async {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    std::process::exit(0);
+                });
+                Ok("Departed from ring".to_string())
+            }
+            Err(e) => {
+                eprintln!("Depart failed: {}", e);
+                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            }
+        }
+    } else {
+        Err(StatusCode::BAD_REQUEST)
+    }
+}
 
 /// Split a CLI line into whitespace-delimited tokens, but keep quoted strings intact.
 ///
@@ -55,7 +145,7 @@ fn split_cli_args(line: &str) -> Vec<String> {
 }
 
 fn main() -> anyhow::Result<()> {
-    // logging
+    // logging completely disabled
     let subscriber = FmtSubscriber::builder()
         .with_max_level(tracing::level_filters::LevelFilter::OFF)
         .finish();
@@ -195,104 +285,44 @@ fn main() -> anyhow::Result<()> {
             });
         });
 
-        // command thread
+        // command thread -> Now an HTTP API thread
         let bs_for_cmd = bootstrap_arg.clone();
+        
+        // We will assign the API port to be exactly 10,000 higher than the node's internal port.
+        // E.g., if the node is 127.0.0.1:8000, the React API connects to 127.0.0.1:18000.
+        let api_port = addr.port() + 10000;
+        let api_addr = SocketAddr::from(([127, 0, 0, 1], api_port));
+
         let cmds = thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().expect("runtime");
-            let stdin = io::stdin();
-            println!("Chordify CLI ready. Type 'help' for commands.");
-            for line in stdin.lock().lines() {
-                let line = match line { Ok(l) => l, Err(_) => break };
+            rt.block_on(async {
+                let state = AppState {
+                    node: command_node,
+                    bootstrap_addr: bs_for_cmd,
+                };
 
-                let tokens = split_cli_args(line.trim());
-                if tokens.is_empty() {
-                    continue;
-                }
+                // CORS is completely open here so your React dev server (e.g., localhost:5173) can access it
+                let cors = CorsLayer::new()
+                    .allow_origin(Any)
+                    .allow_methods(Any)
+                    .allow_headers(Any);
 
-                let cmd = tokens[0].as_str();
-                match cmd {
-                    "insert" => {
-                        if tokens.len() >= 3 {
-                            let k = &tokens[1];
-                            let v = &tokens[2];
-                            println!("Inserting key '{}' with value '{}'...", k, v);
-                            match rt.block_on(command_node.insert(k.to_string(), v.to_string())) {
-                                Ok(_) => println!("Insert successful."),
-                                Err(e) => println!("Insert failed: {}", e),
-                            }
-                        } else {
-                            println!("usage: insert <key> <value>  (use double quotes for spaces)");
-                        }
-                    }
-                    "query" => {
-                        if tokens.len() >= 2 {
-                            let k = &tokens[1];
-                            // Allow wildcard query "*" to fetch all keys
-                            println!("Querying key '{}'...", k);
-                            let results = rt.block_on(command_node.query(k.to_string()));
-                            if results.is_empty() {
-                                println!("no entries found");
-                            } else {
-                                for (hash, vals) in results {
-                                    if vals.is_empty() {
-                                        println!("key hash {}: <none>", hash);
-                                    } else {
-                                        println!("key hash {}: {}", hash, vals.join(", "));
-                                    }
-                                }
-                            }
-                        } else {
-                            println!("usage: query <key|*>  (use double quotes for spaces)");
-                        }
-                    }
-                    "delete" => {
-                        if tokens.len() >= 2 {
-                            let k = &tokens[1];
-                            println!("Deleting key '{}'...", k);
-                            match rt.block_on(command_node.delete(k.to_string())) {
-                                Ok(_) => println!("Delete successful."),
-                                Err(e) => println!("Delete failed: {}", e),
-                            }
-                        } else {
-                            println!("usage: delete <key>  (use double quotes for spaces)");
-                        }
-                    }
-                    "overlay" => {
-                        println!("Requesting ring topology...");
-                        let topo = rt.block_on(command_node.overlay());
-                        if topo.is_empty() {
-                            println!("overlay request failed or ring is empty");
-                        } else {
-                            println!("ring topology (id -> addr):");
-                            for (id, addr) in topo {
-                                println!("  {} -> {}", id, addr);
-                            }
-                        }
-                    }
-                    "depart" => {
-                        if let Some(bs) = bs_for_cmd {
-                            println!("Departing from ring via bootstrap at {}...", bs);
-                            match rt.block_on(command_node.depart(bs)) {
-                                Ok(_) => println!("Departed from ring."),
-                                Err(e) => println!("Depart failed: {}", e),
-                            }
-                        } else {
-                            println!("bootstrap node cannot depart");
-                        }
-                        std::process::exit(1);
-                    }
-                    "help" => {
-                        println!("\nChordify CLI Commands:");
-                        println!("  help                          - Show this help message");
-                        println!("  insert <key> <value>          - Insert a key-value pair (quote fields with spaces)");
-                        println!("  delete <key>                  - Delete a key (quote key with spaces)");
-                        println!("  query <key|*>                 - Query a key or all keys (use *); quote key with spaces");
-                        println!("  depart                        - Depart from the ring");
-                        println!("  overlay                       - Print ring topology");
-                    }
-                    _ => println!("unknown command '{}'", cmd),
-                }
-            }
+                let app = Router::new()
+                    .route("/insert", post(handle_insert))
+                    // Note: Since React might pass "*", we use a query param or careful path routing. 
+                    // Axum handles wildcards in paths fine if URL-encoded.
+                    .route("/query/{key}", get(handle_query)) 
+                    .route("/delete/{key}", delete(handle_delete))
+                    .route("/overlay", get(handle_overlay))
+                    .route("/depart", post(handle_depart))
+                    .layer(cors)
+                    .with_state(state);
+
+                println!("Chordify HTTP API ready at http://{}", api_addr);
+                
+                let listener = tokio::net::TcpListener::bind(api_addr).await.expect("Failed to bind API port");
+                axum::serve(listener, app).await.expect("API server crashed");
+            });
         });
 
         cmds.join().expect("command thread panicked");
@@ -301,33 +331,73 @@ fn main() -> anyhow::Result<()> {
         // bootstrap node: require k and t
         if k.is_none() || t.is_none() {
             println!("Error: Both -k <replication factor> and -m <replication mode> must be provided for bootstrap node.");
-            println!("Usage: chordify <my_ip:port> -k <replication factor> -m <replication mode (t = 0 for linearizability, 1 for eventual consistency)>");
             std::process::exit(1);
         }
         let k = k.unwrap();
-        let t = t.unwrap();
-        if t != 0 && t != 1 {
-            println!("Error: Replication mode (-m) must be 0 (linearizability) or 1 (eventual consistency).");
-            std::process::exit(1);
-        }
-        if k < 1 {
-            println!("Error: Replication factor (-k) must be at least 1.");
-            std::process::exit(1);
-        }
-        let t = t as u8;
+        let t = t.unwrap() as u8;
+        
         println!("Starting as bootstrap node at {}", addr);
         println!("Bootstrap is running ... Open a node to use the command line interface in a separate terminal with:\n  {} <my_ip:port> <bootstrap_ip:port>", args.get(0).unwrap_or(&"chordify".to_string()));
-        let bootstrap = BootstrapNode::new(addr, k, t);
+        
+        let t_val = t as u8;
+        
+        println!("Starting as bootstrap node at {}", addr);
+        let bootstrap = Arc::new(BootstrapNode::new(addr, k, t_val));
+        let api_port = addr.port() + 10000;
+        let api_addr = SocketAddr::from(([127, 0, 0, 1], api_port));
+        
+        // 1. Wrap the bootstrap node in an Arc to guarantee it stays in memory
+        // let bootstrap = Arc::new(BootstrapNode::new(addr, k, t));
         
         let network_handle = thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().expect("unable to make runtime");
             rt.block_on(async move {
-                let _ = bootstrap.run().await;
+                let bs_for_run = Arc::clone(&bootstrap);
+                let bs_for_api = Arc::clone(&bootstrap);
+                
+                // 1. Run the Chord Listener
+                tokio::spawn(async move {
+                    if let Err(e) = bs_for_run.run().await {
+                        eprintln!("CRITICAL ERROR: Bootstrap node crashed: {}", e);
+                    }
+                });
+
+
+                // 2. Start the HTTP API for the Bootstrap Node
+                // Note: If BootstrapNode doesn't support .overlay() or .query(), 
+                // you may need to implement a dummy handler or add those methods to BootstrapNode.
+                let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
+                let app = Router::new()
+                    .route("/overlay", get(move || {
+                        // Clone again inside the closure to move into the async block
+                        let bs = Arc::clone(&bs_for_api);
+                        async move {
+                            let members = bs.ring_members.read().await;
+                            
+                            // Map NodeInfo to (u64, SocketAddr) tuples so the JSON matches the regular node
+                            let topology: Vec<(u64, SocketAddr)> = members
+                                .iter()
+                                .map(|m| (m.id, m.addr))
+                                .collect();
+                                
+                            // Add the bootstrap node itself to the topology 
+                            let bs_info = (0, addr);
+                            let mut full_topology = vec![bs_info];
+                            full_topology.extend(topology);
+
+                            Json(full_topology)
+                        }
+                    })) // You may need to implement this for BootstrapNode
+                    .route("/ping", get(|| async { "pong" })) // Simple health check endpoint
+                    .layer(cors);
+
+                println!("Chordify HTTP API (Bootstrap) ready at http://{}", api_addr);
+                let listener = tokio::net::TcpListener::bind(api_addr).await.unwrap();
+                axum::serve(listener, app).await.unwrap();
             });
         });
+        
         network_handle.join().expect("network thread panicked");
-        // Exit immediately after printing the message (or block forever if you want the process to stay alive)
-        // std::thread::park();
         return Ok(());
     }
 
