@@ -177,7 +177,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     println!("TOTAL QUERIED KEYS: {}", i);
-    //println!("LENGTH {}",results.len());
     tokio::time::sleep(Duration::from_millis(args.pre_query_wait_ms)).await;
 
     // Best-effort depart.

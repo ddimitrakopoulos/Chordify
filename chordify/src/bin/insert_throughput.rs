@@ -155,6 +155,24 @@ async fn main() -> anyhow::Result<()> {
 
     let elapsed = start.elapsed();
 
+
+    let results = node.query("*".to_string()).await;
+    let mut i = 0;
+    if results.is_empty() {
+        println!("no entries found");
+    } else {
+        for (hash, vals) in results {
+            if vals.is_empty() {
+                //println!("key hash {}: <none>", hash);
+            } else {
+                //println!("key hash {}: {}", hash, vals.join(", "));
+            }
+            i += vals.len();
+        }
+    }
+    println!("TOTAL QUERIED KEYS: {}", i);
+    tokio::time::sleep(Duration::from_millis(2000)).await;
+
     // Best-effort depart.
     if let Err(e) = node.depart(args.bootstrap).await {
         warn!("node depart failed (ignored): {e:?}");
